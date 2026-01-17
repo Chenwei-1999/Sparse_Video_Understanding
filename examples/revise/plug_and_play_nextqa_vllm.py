@@ -22,9 +22,15 @@ from PIL import Image
 from verl.experimental.agent_loop.revise_agent_loop import (
     DEFAULT_SYSTEM_PROMPT,
     _extract_tag,
+    _normalize_answer_letter,
     _parse_frame_indices,
     _sample_uniform_indices,
 )
+
+try:
+    import wandb  # type: ignore
+except Exception:  # pragma: no cover
+    wandb = None
 
 
 _SUMMARY_RE = re.compile(r"<summary>(.*?)</summary>", re.DOTALL | re.IGNORECASE)
@@ -175,12 +181,132 @@ def _load_nextqa_samples(
     return samples
 
 
+def _sample_unseen_frames(frame_count: int, seen: set[int], k: int, rng: random.Random) -> list[int]:
+    if frame_count <= 0 or k <= 0:
+        return []
+    if len(seen) >= frame_count:
+        return []
+    candidates = [i for i in range(frame_count) if i not in seen]
+    if not candidates:
+        return []
+    if len(candidates) <= k:
+        return candidates
+    return sorted(rng.sample(candidates, k=k))
+
+
 def _maybe_log_jsonl(path: Optional[str], obj: dict[str, Any]) -> None:
     if not path:
         return
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "a", encoding="utf-8") as f:
         f.write(json.dumps(obj, ensure_ascii=False) + "\n")
+
+
+def _maybe_init_wandb(args: argparse.Namespace, run_config: dict[str, Any]) -> Any:
+    if not getattr(args, "use_wandb", False) or wandb is None:
+        return None
+
+    mode = getattr(args, "wandb_mode", "") or os.getenv("WANDB_MODE")
+    if not mode:
+        mode = "online" if os.getenv("WANDB_API_KEY") else "offline"
+
+    return wandb.init(
+        project=args.wandb_project,
+        entity=args.wandb_entity,
+        name=args.wandb_name,
+        group=args.wandb_group,
+        tags=args.wandb_tags.split(",") if args.wandb_tags else None,
+        mode=mode,
+        config=run_config,
+        reinit=True,
+    )
+
+
+def _wandb_log(run: Any, metrics: dict[str, Any], step: int) -> None:
+    if run is None or wandb is None:
+        return
+    wandb.log(metrics, step=step)
+
+
+def _load_progress_from_log(
+    log_path: str,
+    max_rounds: int,
+    default_num_choices: int = 5,
+) -> tuple[int, int, int]:
+    if not log_path or not os.path.exists(log_path):
+        return 0, 0, 0
+
+    completed = 0
+    correct = 0
+    total_rounds = 0
+
+    in_sample = False
+    current_gt_idx = -1
+    current_num_choices = default_num_choices
+    current_answer: Optional[str] = None
+    current_answer_round: Optional[int] = None
+
+    def _finalize_sample() -> None:
+        nonlocal completed, correct, total_rounds
+        nonlocal in_sample, current_gt_idx, current_num_choices, current_answer, current_answer_round
+        if not in_sample:
+            return
+        if current_answer is None or current_answer_round is None:
+            return
+        completed += 1
+        pred_idx = ord(current_answer) - ord("A")
+        if current_gt_idx >= 0 and pred_idx == current_gt_idx:
+            correct += 1
+        total_rounds += min(current_answer_round, max_rounds)
+
+    with open(log_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except Exception:
+                continue
+
+            forced = bool(obj.get("forced_answer", False))
+            raw = str(obj.get("raw_output", ""))
+
+            try:
+                round_idx = int(obj.get("round_idx", 0))
+            except Exception:
+                round_idx = 0
+
+            # New sample boundary: every sample starts from round_idx=1 (forced answer is logged as max_rounds+1).
+            if not in_sample or (round_idx == 1 and not forced):
+                _finalize_sample()
+                in_sample = True
+                try:
+                    current_gt_idx = int(obj.get("ground_truth_idx", -1))
+                except Exception:
+                    current_gt_idx = -1
+                choices = obj.get("choices", [])
+                current_num_choices = len(choices) if isinstance(choices, list) and choices else default_num_choices
+                current_answer = None
+                current_answer_round = None
+
+            answer = _extract_tag(raw, _ANSWER_RE)
+            if answer and current_answer is None:
+                answer_letter = _normalize_answer_letter(answer, current_num_choices)
+                if answer_letter is not None:
+                    current_answer = answer_letter
+                    # For forced answers, we log an extra request after max_rounds, but the "round budget" is max_rounds.
+                    current_answer_round = min(round_idx, max_rounds)
+
+    _finalize_sample()
+    return completed, correct, total_rounds
+
+
+def _count_file_lines(path: str) -> int:
+    if not path or not os.path.exists(path):
+        return 0
+    with open(path, "r", encoding="utf-8") as f:
+        return sum(1 for _ in f)
 
 
 def _chat_once(
@@ -327,9 +453,29 @@ def main() -> int:
     parser.add_argument("--log-jsonl", default=os.getenv("REVISE_LOG_PATH", "debug_prompt_logs/revise_samples.jsonl"))
     parser.add_argument("--summary-json", default=None, help="Optional path to save a run summary JSON.")
     parser.add_argument("--progress-interval", type=int, default=10)
+    parser.add_argument(
+        "--resume-from-log",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="If log-jsonl exists, skip already-completed samples and continue appending to the same log.",
+    )
+    parser.add_argument(
+        "--force-final-answer",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="If no <answer> is produced within max rounds, issue a final answer-only request (matches ReviseAgentLoop).",
+    )
+    parser.add_argument("--use-wandb", action="store_true", help="Log eval metrics to Weights & Biases.")
+    parser.add_argument("--wandb-project", default=os.getenv("WANDB_PROJECT", "verl-revise"))
+    parser.add_argument("--wandb-entity", default=os.getenv("WANDB_ENTITY"))
+    parser.add_argument("--wandb-name", default=os.getenv("WANDB_RUN_NAME"))
+    parser.add_argument("--wandb-group", default=os.getenv("WANDB_RUN_GROUP"))
+    parser.add_argument("--wandb-tags", default=os.getenv("WANDB_TAGS", ""))
+    parser.add_argument("--wandb-mode", default=os.getenv("WANDB_MODE", ""))
     args = parser.parse_args()
 
     random.seed(args.seed)
+    rng = random.Random(args.seed)
 
     server_proc: Optional[subprocess.Popen[str]] = None
     try:
@@ -350,11 +496,45 @@ def main() -> int:
         if not samples:
             raise RuntimeError("No samples loaded (check csv/map/video_root).")
 
+        resume_completed = 0
         correct = 0
         total_rounds = 0
+        if args.resume_from_log and args.log_jsonl and os.path.exists(args.log_jsonl):
+            resume_completed, correct, total_rounds = _load_progress_from_log(
+                args.log_jsonl, max_rounds=args.max_rounds
+            )
+            resume_completed = min(resume_completed, len(samples))
+
+        processed = resume_completed
         failed = 0
+        run = _maybe_init_wandb(
+            args,
+            run_config={
+                "task": "revise_plug_and_play_nextqa_vllm",
+                "dataset_csv": args.csv,
+                "video_root": args.video_root,
+                "map_json": args.map_json,
+                "model_path": args.model_path,
+                "engine": "vllm",
+                "tensor_parallel_size": args.tensor_parallel_size,
+                "dtype": args.dtype,
+                "max_model_len": args.max_model_len,
+                "gpu_memory_utilization": args.gpu_memory_utilization,
+                "max_samples": args.max_samples,
+                "max_rounds": args.max_rounds,
+                "max_frames_per_round": args.max_frames_per_round,
+                "temperature": args.temperature,
+                "top_p": args.top_p,
+                "max_tokens": args.max_tokens,
+                "force_final_answer": args.force_final_answer,
+                "resume_from_log": args.resume_from_log,
+                "initial_completed": resume_completed,
+                "log_jsonl": args.log_jsonl,
+            },
+        )
         start_eval = time.time()
-        for idx, sample in enumerate(samples, start=1):
+        for sample in samples[resume_completed:]:
+            processed += 1
             try:
                 frame_count = sample.frame_count
                 if frame_count <= 0:
@@ -375,6 +555,9 @@ def main() -> int:
                 init_frames = _sample_uniform_indices(frame_count, args.max_frames_per_round)
                 next_frames = [int(i) for i in init_frames if i >= 0]
                 answer_letter: Optional[str] = None
+                last_user_text: Optional[str] = None
+                last_images: list[Image.Image] = []
+                last_frames: list[int] = []
 
                 for round_idx in range(1, args.max_rounds + 1):
                     # Frames shown in this round.
@@ -395,6 +578,14 @@ def main() -> int:
                         frame_indices=frames_this_round,
                         seen_frames=seen_frames,
                     )
+                    if args.force_final_answer and round_idx >= args.max_rounds:
+                        user_text = (
+                            f"{user_text}\n\n"
+                            "This is the final round. You MUST answer now using <answer>LETTER</answer>."
+                        )
+                    last_user_text = user_text
+                    last_images = images
+                    last_frames = frames_this_round
 
                     raw = _chat_once(
                         base_url=base_url,
@@ -430,7 +621,7 @@ def main() -> int:
 
                     answer = _extract_tag(raw, _ANSWER_RE)
                     if answer:
-                        answer_letter = answer.strip().upper()[:1]
+                        answer_letter = _normalize_answer_letter(answer, len(sample.choices))
                         break
 
                     frames_text = _extract_tag(raw, _FRAMES_RE)
@@ -440,11 +631,54 @@ def main() -> int:
                     if frames_text:
                         requested = _parse_frame_indices(frames_text)
                         requested = [i for i in requested if 0 <= i < frame_count and i not in seen_frames]
+                        if not requested:
+                            requested = _sample_unseen_frames(
+                                frame_count, set(seen_frames), args.max_frames_per_round, rng=rng
+                            )
                         next_frames = requested[: args.max_frames_per_round]
                     else:
                         next_frames = _sample_uniform_indices(frame_count, 1)
 
                 total_rounds += round_idx
+                if args.force_final_answer and answer_letter is None and last_user_text is not None:
+                    forced_user_text = (
+                        f"{last_user_text}\n\n"
+                        "Max rounds reached. Provide the final answer now using <answer>LETTER</answer> only."
+                    )
+                    raw = _chat_once(
+                        base_url=base_url,
+                        model_id=model_id,
+                        system_prompt=system_prompt,
+                        user_text=forced_user_text,
+                        images=last_images,
+                        temperature=args.temperature,
+                        top_p=args.top_p,
+                        max_tokens=args.max_tokens,
+                        timeout_s=args.request_timeout_s,
+                    )
+                    _maybe_log_jsonl(
+                        args.log_jsonl,
+                        {
+                            "ts": time.time(),
+                            "qid": sample.qid,
+                            "video_id": sample.video_id,
+                            "video_path": sample.video_path,
+                            "round_idx": args.max_rounds + 1,
+                            "forced_answer": True,
+                            "question": sample.question,
+                            "choices": sample.choices,
+                            "ground_truth_idx": sample.answer_idx,
+                            "seen_frames": seen_frames,
+                            "current_frames": last_frames,
+                            "summary_in": summary_state,
+                            "system_prompt": system_prompt,
+                            "user_text": forced_user_text,
+                            "raw_output": raw,
+                        },
+                    )
+                    answer = _extract_tag(raw, _ANSWER_RE)
+                    if answer:
+                        answer_letter = _normalize_answer_letter(answer, len(sample.choices))
 
                 if answer_letter is not None:
                     pred_idx = ord(answer_letter) - ord("A")
@@ -467,18 +701,32 @@ def main() -> int:
                     _wait_port(args.host, args.port, timeout_s=args.server_timeout_s)
                     model_id = _get_model_id(base_url)
 
-            if args.progress_interval > 0 and idx % args.progress_interval == 0:
+            if args.progress_interval > 0 and processed % args.progress_interval == 0:
                 elapsed = time.time() - start_eval
+                acc = correct / max(1, processed)
+                avg_rounds = total_rounds / max(1, processed)
                 print(
-                    f"[{idx}/{len(samples)}] acc={correct/idx:.4f} avg_rounds={total_rounds/idx:.3f} "
+                    f"[{processed}/{len(samples)}] acc={acc:.4f} avg_rounds={avg_rounds:.3f} "
                     f"failed={failed} elapsed_s={elapsed:.1f}",
                     flush=True,
                 )
+                _wandb_log(
+                    run,
+                    {
+                        "eval/acc": acc,
+                        "eval/avg_rounds": avg_rounds,
+                        "eval/failed": failed,
+                        "eval/processed": processed,
+                        "eval/elapsed_s": elapsed,
+                    },
+                    step=processed,
+                )
 
-        processed = len(samples)
         acc = correct / max(1, processed)
         avg_rounds = total_rounds / max(1, processed)
         elapsed = time.time() - start_eval
+        prompt_log_lines = _count_file_lines(args.log_jsonl) if args.log_jsonl else 0
+        prompt_log_bytes = os.path.getsize(args.log_jsonl) if args.log_jsonl and os.path.exists(args.log_jsonl) else 0
         results = {
             "samples": processed,
             "accuracy": acc,
@@ -487,6 +735,26 @@ def main() -> int:
             "elapsed_s": elapsed,
         }
         print(json.dumps(results, indent=2))
+        _wandb_log(
+            run,
+            {
+                "eval/final_acc": acc,
+                "eval/final_avg_rounds": avg_rounds,
+                "eval/final_failed": failed,
+                "eval/final_elapsed_s": elapsed,
+                "eval/prompt_log_lines": prompt_log_lines,
+                "eval/prompt_log_bytes": prompt_log_bytes,
+            },
+            step=processed,
+        )
+        if run is not None:
+            run.summary["prompt_log_jsonl"] = args.log_jsonl
+            run.summary["prompt_log_lines"] = prompt_log_lines
+            run.summary["prompt_log_bytes"] = prompt_log_bytes
+            run.summary["final_acc"] = acc
+            run.summary["final_avg_rounds"] = avg_rounds
+            run.summary["final_failed"] = failed
+            run.finish()
 
         if args.summary_json:
             summary_dir = os.path.dirname(args.summary_json)
@@ -513,6 +781,21 @@ def main() -> int:
                         "max_tokens": args.max_tokens,
                         "results": results,
                         "prompt_log_jsonl": args.log_jsonl,
+                        "prompt_log_lines": prompt_log_lines,
+                        "prompt_log_bytes": prompt_log_bytes,
+                        "wandb": {
+                            "enabled": bool(args.use_wandb),
+                            "mode": args.wandb_mode
+                            or os.getenv("WANDB_MODE")
+                            or ("online" if os.getenv("WANDB_API_KEY") else "offline"),
+                            "project": args.wandb_project,
+                            "entity": args.wandb_entity,
+                            "name": args.wandb_name,
+                            "group": args.wandb_group,
+                            "id": getattr(run, "id", None),
+                            "run_dir": getattr(run, "dir", None),
+                            "url": getattr(run, "url", None),
+                        },
                         "command": "python " + " ".join(os.sys.argv),
                     },
                     f,
