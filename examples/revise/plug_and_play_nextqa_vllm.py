@@ -22,7 +22,6 @@ from PIL import Image
 from verl.experimental.agent_loop.revise_agent_loop import (
     DEFAULT_SYSTEM_PROMPT,
     _extract_tag,
-    _normalize_answer_letter,
     _parse_frame_indices,
     _sample_uniform_indices,
 )
@@ -174,19 +173,6 @@ def _load_nextqa_samples(
         if max_samples > 0 and len(samples) >= max_samples:
             break
     return samples
-
-
-def _sample_unseen_frames(frame_count: int, seen: set[int], k: int, rng: random.Random) -> list[int]:
-    if frame_count <= 0 or k <= 0:
-        return []
-    if len(seen) >= frame_count:
-        return []
-    candidates = [i for i in range(frame_count) if i not in seen]
-    if not candidates:
-        return []
-    if len(candidates) <= k:
-        return candidates
-    return sorted(rng.sample(candidates, k=k))
 
 
 def _maybe_log_jsonl(path: Optional[str], obj: dict[str, Any]) -> None:
@@ -343,7 +329,7 @@ def main() -> int:
     parser.add_argument("--progress-interval", type=int, default=10)
     args = parser.parse_args()
 
-    rng = random.Random(args.seed or 42)
+    random.seed(args.seed)
 
     server_proc: Optional[subprocess.Popen[str]] = None
     try:
@@ -389,8 +375,6 @@ def main() -> int:
                 init_frames = _sample_uniform_indices(frame_count, args.max_frames_per_round)
                 next_frames = [int(i) for i in init_frames if i >= 0]
                 answer_letter: Optional[str] = None
-                last_user_text: Optional[str] = None
-                last_images: list[Image.Image] = []
 
                 for round_idx in range(1, args.max_rounds + 1):
                     # Frames shown in this round.
@@ -411,8 +395,6 @@ def main() -> int:
                         frame_indices=frames_this_round,
                         seen_frames=seen_frames,
                     )
-                    last_user_text = user_text
-                    last_images = images
 
                     raw = _chat_once(
                         base_url=base_url,
@@ -448,7 +430,7 @@ def main() -> int:
 
                     answer = _extract_tag(raw, _ANSWER_RE)
                     if answer:
-                        answer_letter = _normalize_answer_letter(answer, len(sample.choices))
+                        answer_letter = answer.strip().upper()[:1]
                         break
 
                     frames_text = _extract_tag(raw, _FRAMES_RE)
@@ -458,56 +440,11 @@ def main() -> int:
                     if frames_text:
                         requested = _parse_frame_indices(frames_text)
                         requested = [i for i in requested if 0 <= i < frame_count and i not in seen_frames]
-                        if not requested:
-                            requested = _sample_unseen_frames(
-                                frame_count, set(seen_frames), args.max_frames_per_round, rng=rng
-                            )
                         next_frames = requested[: args.max_frames_per_round]
                     else:
                         next_frames = _sample_uniform_indices(frame_count, 1)
 
                 total_rounds += round_idx
-
-                if answer_letter is None and last_user_text is not None:
-                    # Fallback: enforce answer-only format at the end to avoid "no answer" samples.
-                    forced_text = (
-                        f"{last_user_text}\n\n"
-                        "Max rounds reached. Provide the final answer now using <answer>LETTER</answer> only."
-                    )
-                    raw = _chat_once(
-                        base_url=base_url,
-                        model_id=model_id,
-                        system_prompt=system_prompt,
-                        user_text=forced_text,
-                        images=last_images,
-                        temperature=args.temperature,
-                        top_p=args.top_p,
-                        max_tokens=args.max_tokens,
-                        timeout_s=args.request_timeout_s,
-                    )
-                    _maybe_log_jsonl(
-                        args.log_jsonl,
-                        {
-                            "ts": time.time(),
-                            "qid": sample.qid,
-                            "video_id": sample.video_id,
-                            "video_path": sample.video_path,
-                            "round_idx": args.max_rounds + 1,
-                            "forced_answer": True,
-                            "question": sample.question,
-                            "choices": sample.choices,
-                            "ground_truth_idx": sample.answer_idx,
-                            "seen_frames": seen_frames,
-                            "current_frames": frames_this_round,
-                            "summary_in": summary_state,
-                            "system_prompt": system_prompt,
-                            "user_text": forced_text,
-                            "raw_output": raw,
-                        },
-                    )
-                    answer = _extract_tag(raw, _ANSWER_RE)
-                    if answer:
-                        answer_letter = _normalize_answer_letter(answer, len(sample.choices))
 
                 if answer_letter is not None:
                     pred_idx = ord(answer_letter) - ord("A")
