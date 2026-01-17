@@ -892,7 +892,19 @@ class AgentLoopManager:
             for replica_rank in range(num_replicas)
         ]
         if self.worker_group:
-            self._run_all([server.init_hybrid(self.worker_group) for server in self.rollout_replicas])
+            rollout_mode = getattr(self.config.actor_rollout_ref.rollout.agent, "rollout_mode", "hybrid")
+            if rollout_mode == "hybrid":
+                self._run_all([server.init_hybrid(self.worker_group) for server in self.rollout_replicas])
+            elif rollout_mode == "colocated":
+                self._run_all(
+                    [server.init_colocated(self.worker_group.resource_pool) for server in self.rollout_replicas]
+                )
+            elif rollout_mode == "standalone":
+                self._run_all([server.init_standalone() for server in self.rollout_replicas])
+            else:
+                raise ValueError(
+                    f"Unknown agent.rollout_mode={rollout_mode!r}. Expected 'hybrid', 'colocated', or 'standalone'."
+                )
         else:
             self._run_all([server.init_standalone() for server in self.rollout_replicas])
         self.server_handles = [server._server_handle for server in self.rollout_replicas]

@@ -29,6 +29,8 @@ install_requires = [
     "datasets",
     "dill",
     "hydra-core",
+    "imageio",
+    "imageio-ffmpeg",
     "numpy<2.0.0",
     "pandas",
     "peft",

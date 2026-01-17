@@ -5,6 +5,8 @@ datasets
 dill
 hydra-core
 liger-kernel
+imageio
+imageio-ffmpeg
 numpy<2.0.0
 pandas
 peft
@@ -16,7 +18,7 @@ ray[default]
 tensordict>=0.8.0,<=0.10.0,!=0.9.0
 torchdata
 transformers
-# vllm==0.8.4
+# vllm>=0.11.0
 wandb
 packaging>=20.0
 uvicorn

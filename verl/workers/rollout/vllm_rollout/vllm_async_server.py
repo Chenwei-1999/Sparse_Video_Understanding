@@ -41,7 +41,10 @@ from vllm.outputs import RequestOutput
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.core import EngineCoreProc
-from vllm.v1.engine.utils import CoreEngineProcManager
+try:
+    from vllm.v1.engine.utils import CoreEngineProcManager
+except ModuleNotFoundError:  # vllm<0.9 may not provide this module
+    CoreEngineProcManager = None
 from vllm.v1.executor.abstract import Executor
 
 from verl.single_controller.ray import RayClassWithInitArgs
@@ -75,7 +78,14 @@ if _VLLM_VERSION > version.parse("0.11.0"):
 
         get_encoding()
 else:
-    from vllm.utils import FlexibleArgumentParser, get_tcp_uri
+    from vllm.utils import FlexibleArgumentParser
+    try:
+        from vllm.utils import get_tcp_uri  # type: ignore[attr-defined]
+    except ImportError:
+        def get_tcp_uri(host: str, port: int) -> str:
+            if is_valid_ipv6_address(host):
+                return f"tcp://[{host}]:{port}"
+            return f"tcp://{host}:{port}"
 if _VLLM_VERSION >= version.parse("0.12.0"):
     from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
     from vllm.v1.outputs import ModelRunnerOutput
@@ -90,8 +100,9 @@ class ExternalZeroMQDistributedExecutor(Executor):
     uses_ray: bool = False
 
     def _init_executor(self) -> None:
-        dp_rank_local = self.vllm_config.parallel_config.data_parallel_rank_local
-        tp_size = self.vllm_config.parallel_config.tensor_parallel_size
+        parallel_cfg = self.vllm_config.parallel_config
+        dp_rank_local = getattr(parallel_cfg, "data_parallel_rank_local", parallel_cfg.data_parallel_rank)
+        tp_size = parallel_cfg.tensor_parallel_size
 
         addresses = os.environ["VERL_VLLM_ZMQ_ADDRESSES"].split(",")
         addresses = addresses[dp_rank_local * tp_size : (dp_rank_local + 1) * tp_size]
@@ -202,7 +213,13 @@ class vLLMHttpServer:
 
         self.config: RolloutConfig = omega_conf_to_dataclass(config)
         self.model_config: HFModelConfig = omega_conf_to_dataclass(model_config, dataclass_type=HFModelConfig)
-        self.config.max_model_len = get_max_position_embeddings(self.model_config.hf_config)
+        # Respect user-configured max_model_len (when set) to reduce memory footprint.
+        # Otherwise default to the model's maximum supported context length.
+        model_max_len = get_max_position_embeddings(self.model_config.hf_config)
+        if self.config.max_model_len is None:
+            self.config.max_model_len = model_max_len
+        else:
+            self.config.max_model_len = min(int(self.config.max_model_len), model_max_len)
         self.rollout_mode = rollout_mode
         self.workers = workers
 
@@ -323,6 +340,10 @@ class vLLMHttpServer:
             **engine_kwargs,
         }
 
+        # vLLM <=0.8 does not support logprobs_mode in AsyncEngineArgs/CLI.
+        if "logprobs_mode" not in getattr(AsyncEngineArgs, "__annotations__", {}):
+            args.pop("logprobs_mode", None)
+
         if self.config.prometheus.enable:
             if self.config.prometheus.served_model_name:
                 # Extract model name from path if it's a full path
@@ -417,8 +438,9 @@ class vLLMHttpServer:
 
         engine_client = AsyncLLM.from_vllm_config(vllm_config=vllm_config, usage_context=usage_context, **kwargs)
 
-        # Don't keep the dummy data in memory
-        await engine_client.reset_mm_cache()
+        # Don't keep the dummy data in memory (if supported by vLLM version).
+        if hasattr(engine_client, "reset_mm_cache"):
+            await engine_client.reset_mm_cache()
 
         app = build_app(args)
         if _VLLM_VERSION > version.parse("0.11.0"):
@@ -432,13 +454,18 @@ class vLLMHttpServer:
         self._server_port, self._server_task = await run_unvicorn(app, args, self._server_address)
 
     async def run_headless(self, args: argparse.Namespace):
+        if CoreEngineProcManager is None:
+            raise RuntimeError(
+                "CoreEngineProcManager is unavailable in the installed vLLM version. "
+                "Upgrade vLLM or run with a single node to avoid headless mode."
+            )
         # Create the EngineConfig.
         engine_args = vllm.AsyncEngineArgs.from_cli_args(args)
         usage_context = UsageContext.OPENAI_API_SERVER
         vllm_config = engine_args.create_engine_config(usage_context=usage_context, headless=True)
 
         parallel_config = vllm_config.parallel_config
-        local_engine_count = parallel_config.data_parallel_size_local
+        local_engine_count = getattr(parallel_config, "data_parallel_size_local", parallel_config.data_parallel_size)
 
         host = parallel_config.data_parallel_master_ip
         port = engine_args.data_parallel_rpc_port  # add to config too

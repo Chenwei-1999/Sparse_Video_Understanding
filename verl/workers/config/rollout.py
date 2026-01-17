@@ -72,6 +72,11 @@ class AgentLoopConfig(BaseConfig):
     default_agent_loop: str = "single_turn_agent"
     agent_loop_config_path: Optional[str] = None
     custom_async_server: CustomAsyncServerConfig = field(default_factory=CustomAsyncServerConfig)
+    # How to launch rollout engines when using AgentLoopManager with a trainer worker group:
+    # - "hybrid": reuse the trainer worker group (rollout + training fused)
+    # - "colocated": launch a separate rollout worker group in the same placement group
+    # - "standalone": launch rollout engines in a dedicated resource pool
+    rollout_mode: str = "hybrid"
     # Fully qualified class name for custom AgentLoopManager (e.g., "mypackage.module.MyManager").
     # Security: This class will be dynamically imported via importlib. Only use trusted class paths.
     agent_loop_manager_class: Optional[str] = None
@@ -178,6 +183,9 @@ class RolloutConfig(BaseConfig):
     trace: TraceConfig = field(default_factory=TraceConfig)
 
     multi_turn: MultiTurnConfig = field(default_factory=MultiTurnConfig)
+
+    # REVISE-style agent loop settings.
+    revise: dict = field(default_factory=dict)
 
     # Server configuration for sglang server mode
     server: ServerConfig = field(default_factory=ServerConfig)

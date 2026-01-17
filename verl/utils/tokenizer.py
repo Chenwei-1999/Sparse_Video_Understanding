@@ -79,27 +79,38 @@ def hf_processor(name_or_path, **kwargs):
         processor = AutoProcessor.from_pretrained(name_or_path, **kwargs)
         config = AutoConfig.from_pretrained(name_or_path, **kwargs)
 
-        # Bind vlm model's get_rope_index method to processor
+        # Bind vlm model's get_rope_index method to processor when available.
         processor.config = config
-        match processor.__class__.__name__:
-            case "Qwen2VLProcessor":
-                from transformers.models.qwen2_vl import Qwen2VLModel
+        try:
+            match processor.__class__.__name__:
+                case "Qwen2VLProcessor":
+                    from transformers.models.qwen2_vl import Qwen2VLModel
 
-                processor.get_rope_index = types.MethodType(Qwen2VLModel.get_rope_index, processor)
-            case "Qwen2_5_VLProcessor":
-                from transformers.models.qwen2_5_vl import Qwen2_5_VLModel
+                    if hasattr(Qwen2VLModel, "get_rope_index"):
+                        processor.get_rope_index = types.MethodType(Qwen2VLModel.get_rope_index, processor)
+                case "Qwen2_5_VLProcessor":
+                    from transformers.models.qwen2_5_vl import Qwen2_5_VLModel
 
-                processor.get_rope_index = types.MethodType(Qwen2_5_VLModel.get_rope_index, processor)
-            case "Qwen3VLProcessor":
-                from transformers.models.qwen3_vl import Qwen3VLModel
+                    if hasattr(Qwen2_5_VLModel, "get_rope_index"):
+                        processor.get_rope_index = types.MethodType(Qwen2_5_VLModel.get_rope_index, processor)
+                case "Qwen3VLProcessor":
+                    from transformers.models.qwen3_vl import Qwen3VLModel
 
-                processor.get_rope_index = types.MethodType(Qwen3VLModel.get_rope_index, processor)
-            case "Glm4vImageProcessor":
-                from transformers.models.glm4v import Glm4vModel
+                    if hasattr(Qwen3VLModel, "get_rope_index"):
+                        processor.get_rope_index = types.MethodType(Qwen3VLModel.get_rope_index, processor)
+                case "Glm4vImageProcessor":
+                    from transformers.models.glm4v import Glm4vModel
 
-                processor.get_rope_index = types.MethodType(Glm4vModel.get_rope_index, processor)
-            case _:
-                raise ValueError(f"Unsupported processor type: {processor.__class__.__name__}")
+                    if hasattr(Glm4vModel, "get_rope_index"):
+                        processor.get_rope_index = types.MethodType(Glm4vModel.get_rope_index, processor)
+                case _:
+                    warnings.warn(
+                        f"Unsupported processor type: {processor.__class__.__name__}. "
+                        "Proceeding without get_rope_index binding.",
+                        stacklevel=1,
+                    )
+        except Exception as e:
+            warnings.warn(f"Failed to bind get_rope_index: {e}", stacklevel=1)
     except Exception as e:
         processor = None
         # TODO(haibin.lin): try-catch should be removed after adding transformer version req to setup.py to avoid

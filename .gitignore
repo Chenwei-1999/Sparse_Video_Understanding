@@ -129,6 +129,7 @@ log
 outputs
 .history
 debug_runs/
+debug_prompt_logs/
 .claude_resources.json
 task_plan.md
 notes.md

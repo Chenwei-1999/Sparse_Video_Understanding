@@ -14,10 +14,12 @@
 import asyncio
 import logging
 import os
+from importlib.metadata import PackageNotFoundError, version
 from abc import ABC, abstractmethod
 from enum import Enum
 from typing import Any, Callable, Optional
 
+from packaging import version as vs
 from omegaconf import DictConfig
 from pydantic import BaseModel
 from ray.actor import ActorHandle
@@ -28,6 +30,18 @@ from verl.utils.config import omega_conf_to_dataclass
 from verl.workers.config import HFModelConfig, RolloutConfig
 
 logger = logging.getLogger(__file__)
+
+
+def _require_pkg_version(pkg: str, min_version: str, install_hint: str) -> str:
+    try:
+        pkg_version = version(pkg)
+    except PackageNotFoundError as exc:
+        raise ImportError(f"{pkg} is not installed. {install_hint}") from exc
+    if vs.parse(pkg_version) < vs.parse(min_version):
+        raise ImportError(
+            f"{pkg} {pkg_version} is too old; require >= {min_version}. {install_hint}"
+        )
+    return pkg_version
 
 
 class TokenOutput(BaseModel):
@@ -229,12 +243,22 @@ class RolloutReplicaRegistry:
 
 # Loader functions for built-in types
 def _load_vllm():
+    _require_pkg_version(
+        "vllm",
+        "0.11.0",
+        "Install a compatible version, e.g. `pip install 'vllm>=0.11.0'`.",
+    )
     from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMReplica
 
     return vLLMReplica
 
 
 def _load_sglang():
+    _require_pkg_version(
+        "sglang",
+        "0.5.5",
+        "Install a compatible version, e.g. `pip install 'sglang[all]>=0.5.5'`.",
+    )
     os.environ["SGLANG_USE_CPU_ENGINE"] = "1"
 
     try:
