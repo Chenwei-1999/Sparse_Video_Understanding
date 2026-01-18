@@ -43,17 +43,25 @@ DEFAULT_SYSTEM_PROMPT = (
     "Do NOT output placeholders like '...', 'none', 'unknown', or 'N/A' in your final output.\n\n"
     "Format 1 — Request more frames (use this only if NOT confident):\n"
     "<think>I am not confident yet; I need more visual evidence to confirm my current hypothesis.</think>\n"
-    "<summary>O: the critical event is not visible in the current frames; H: B; R: request frames around the key moment; P: [0, 12]; U: whether the key evidence matches option B</summary>\n"
+    "<summary>O: George seems to pause and think about something, then begins checking the items inside the shelves; "
+    "H: his curiosity appears connected to the objects he finds or examines on the shelves; "
+    "R: looking at later frames may help confirm what exactly caught his attention or what he discovered; "
+    "P: the agent has already seen frames 4, 8, and 12; "
+    "U: it is still unclear what first caused his curiosity or made him start investigating</summary>\n"
     "<frames>18, 24</frames>\n\n"
     "Format 2 — Answer now (use this if confident):\n"
     "<think>I am confident now; the observed evidence matches my hypothesis.</think>\n"
-    "<summary>O: the key evidence is visible and matches option B; H: B; R: answered; P: [0, 12, 18, 24]; U: evidence is sufficient to answer</summary>\n"
+    "<summary>O: the key evidence is visible in the shown frames; "
+    "H: my belief is updated based on the observed evidence; "
+    "R: answered; "
+    "P: the agent has already seen frames 0, 12, 18, and 24; "
+    "U: no remaining ambiguity that affects the answer</summary>\n"
     "<answer>B</answer>\n\n"
     "Tag meanings:\n"
     "- <think>: 1–2 short sentences describing your decision (NOT the final answer).\n"
     "- <summary>: the ONLY persistent memory across rounds. Keep it short and update it EVERY round.\n"
     "  - O (Observations): what you currently observe in the selected frames.\n"
-    "  - H (Hypothesis): updated beliefs and your current answer candidate (include the option letter).\n"
+    "  - H (Belief updates): your updated belief based on what has been observed so far.\n"
     "  - R (Reasons): why you need more frames and what evidence you are looking for next.\n"
     "  - P (Previously seen): which frames have already been used/seen.\n"
     "  - U (Uncertainties): what is still unknown or ambiguous.\n\n"
@@ -62,9 +70,10 @@ DEFAULT_SYSTEM_PROMPT = (
     "- If you are confident, answer instead of requesting more frames.\n"
     "- If requesting, choose 1 to {max_frames_per_round} NEW frames to view NEXT.\n"
     "- Do NOT output any frame index from the Seen frames list; those are already viewed.\n"
-    "- If you are uncertain, still set H to your current best guess letter (exactly one letter).\n"
     "- In <frames>, output comma-separated integers only (no brackets, no text).\n"
-    "- In <summary>, include O/H/R/P/U. H must contain EXACTLY ONE option letter (do not list multiple).\n"
+    "- In <summary>, include O/H/R/P/U as short natural-language sentences that reflect your current understanding.\n"
+    "- In P, describe previously seen frames in a sentence (e.g., 'the agent has already seen frames 4, 8, and 12'); "
+    "do NOT use Python list formatting like [4, 8, 12].\n"
     "- In <answer>, output EXACTLY ONE option letter shown in the question (e.g., A/B/C/D/E). No words/punctuation.\n"
     "- Never copy the example text; replace it with information from the current video.\n"
 )
@@ -117,6 +126,12 @@ _PLACEHOLDER_SET = {"...", "…", "none", "n/a", "na", "null", "unknown", "unsur
 
 def _collapse_ws(text: str) -> str:
     return re.sub(r"\s+", " ", str(text)).strip()
+
+
+def _format_frame_list(frames: list[int]) -> str:
+    if not frames:
+        return "no frames yet"
+    return ", ".join(str(int(i)) for i in frames)
 
 
 def _is_placeholder(text: str) -> bool:
@@ -194,7 +209,7 @@ def _build_user_text(
     lines = [
         f"Round {round_idx} / Question:\n{question_block}",
         f"Total frames L = {frame_count}.",
-        f"Seen frames (already viewed; do NOT request these again): {seen_frames}",
+        f"Seen frames (already viewed; do NOT request these again): {_format_frame_list(seen_frames)}",
         "Current summary:",
         f"<summary>{summary}</summary>",
         "Frames shown in this round:",
@@ -202,7 +217,8 @@ def _build_user_text(
     if candidate_next_frames:
         lines.insert(
             3,
-            f"Candidate NEW frames to request NEXT (choose 1–{max_frames_per_round} from this list): {candidate_next_frames}",
+            "Candidate NEW frames to request NEXT "
+            f"(choose 1–{max_frames_per_round} from this list): {_format_frame_list(candidate_next_frames)}",
         )
     for idx in frame_indices:
         lines.append(f"Frame {idx} <image>")
@@ -760,7 +776,13 @@ def main() -> int:
                 question_block = _format_question(sample.question, sample.choices)
                 system_prompt = DEFAULT_SYSTEM_PROMPT.format(max_frames_per_round=args.max_frames_per_round)
 
-                summary_state = "O: no reliable observation yet; H: A; R: need evidence from frames; P: []; U: key detail unclear"
+                summary_state = (
+                    "O: no reliable observation yet; "
+                    "H: my belief will be updated based on what is observed; "
+                    "R: need evidence from frames; "
+                    "P: the agent has not seen any frames yet; "
+                    "U: key detail is still unclear"
+                )
                 seen_frames: list[int] = []
 
                 init_frames = _sample_uniform_indices(frame_count, args.max_frames_per_round)
@@ -960,7 +982,9 @@ def main() -> int:
                                         k=max(12, args.max_frames_per_round * 4),
                                         rng=rng,
                                     )
-                                candidate_text = f" Unseen candidates: {candidates}." if candidates else ""
+                                candidate_text = (
+                                    f" Unseen candidates: {_format_frame_list(candidates)}." if candidates else ""
+                                )
                                 retry_feedback = _retry_feedback_text(
                                     "Invalid response: requested frames must be NEW and within range. "
                                     "In <frames>, output 1–{k} comma-separated integers NOT in Seen frames.".format(

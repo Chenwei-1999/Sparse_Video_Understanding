@@ -80,7 +80,12 @@ def _normalize_answer_letter(answer_text: str, num_choices: int) -> str | None:
 
 
 def _summary_quality(summary_text: str, num_choices: int) -> float:
-    """Return 1.0 for well-formed, non-placeholder O/H/R/P/U summary; else 0.0."""
+    """Return a quality score for a well-formed, non-placeholder O/H/R/P/U summary.
+
+    We reward informative, non-placeholder content (O/H/R/U) and a concrete, natural-language
+    description of previously seen frames (P). The score is only used as a conditional bonus
+    when the final answer is correct (see `compute_score`).
+    """
     if summary_text is None:
         return 0.0
     summary = _collapse_ws(summary_text)
@@ -92,29 +97,40 @@ def _summary_quality(summary_text: str, num_choices: int) -> float:
         if re.search(rf"\b{key}\s*:", summary, re.IGNORECASE) is None:
             return 0.0
 
-    # H: must contain exactly one option letter.
-    h_match = re.search(r"\bH\s*:\s*([^;]+)", summary, re.IGNORECASE)
-    if not h_match:
-        return 0.0
-    h_field = h_match.group(1)
-    letters = re.findall(r"\b([A-E])\b", h_field, re.IGNORECASE)
-    unique_letters = {l.upper() for l in letters}
-    if len(unique_letters) != 1:
-        return 0.0
-    if _normalize_answer_letter(next(iter(unique_letters)), num_choices) is None:
+    def _field(key: str) -> str | None:
+        m = re.search(
+            rf"\b{key}\s*:\s*(.*?)(?=\b(?:O|H|R|P|U)\s*:|$)",
+            summary,
+            re.IGNORECASE | re.DOTALL,
+        )
+        if not m:
+            return None
+        return _collapse_ws(m.group(1))
+
+    o_text = _field("O")
+    h_text = _field("H")
+    r_text = _field("R")
+    p_text = _field("P")
+    u_text = _field("U")
+    if any(v is None for v in [o_text, h_text, r_text, p_text, u_text]):
         return 0.0
 
-    # P: should include at least one frame index.
-    p_match = re.search(r"\bP\s*:\s*([^;]+)", summary, re.IGNORECASE)
-    if not p_match or not re.findall(r"\d+", p_match.group(1)):
-        return 0.0
+    # Reward informative, non-placeholder content for O/H/R/U.
+    o_q = _text_quality(o_text, min_words=4)
+    h_q = _text_quality(h_text, min_words=4)
+    r_q = _text_quality(r_text, min_words=4)
+    u_q = _text_quality(u_text, min_words=4)
 
-    # Avoid placeholder/empty content in O/R/U.
-    for key in ["O", "R", "U"]:
-        m = re.search(rf"\b{key}\s*:\s*([^;]+)", summary, re.IGNORECASE)
-        if not m or _is_placeholder(m.group(1)):
-            return 0.0
-    return 1.0
+    # P: must include at least one frame index and avoid Python list formatting like "[4, 8, 12]".
+    p_q = 1.0
+    if _is_placeholder(p_text):
+        p_q = 0.0
+    elif "[" in p_text or "]" in p_text:
+        p_q = 0.0
+    elif not re.findall(r"\d+", p_text):
+        p_q = 0.0
+
+    return float((o_q + h_q + r_q + p_q + u_q) / 5.0)
 
 
 def compute_score(
