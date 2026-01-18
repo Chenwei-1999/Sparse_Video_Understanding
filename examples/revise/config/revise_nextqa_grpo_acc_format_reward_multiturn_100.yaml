@@ -83,7 +83,7 @@ actor_rollout_ref:
       max_rounds: 5
       max_frames_per_round: 5
       max_vision_inputs: 25
-      max_retries_per_round: 2
+      max_retries_per_round: 0
       initial_sampling: uniform
       include_timestamps: True
 

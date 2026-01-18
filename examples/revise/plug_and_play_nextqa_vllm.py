@@ -676,8 +676,8 @@ def main() -> int:
     parser.add_argument(
         "--max-retries-per-round",
         type=int,
-        default=1,
-        help="Retry budget when the model output is missing required tags or requests invalid frames.",
+        default=0,
+        help="Retry budget when the model output is missing required tags or requests invalid frames (default: 0 = no retries).",
     )
     parser.add_argument("--log-jsonl", default=os.getenv("REVISE_LOG_PATH", "debug_prompt_logs/revise_samples.jsonl"))
     parser.add_argument("--summary-json", default=None, help="Optional path to save a run summary JSON.")

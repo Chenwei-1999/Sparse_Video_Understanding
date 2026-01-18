@@ -345,7 +345,7 @@ class ReviseAgentLoop(AgentLoopBase):
         self.max_frames_per_round = int(revise_cfg.get("max_frames_per_round", 3))
         # Cap the total number of vision inputs carried across multi-round context.
         self.max_vision_inputs = int(revise_cfg.get("max_vision_inputs", 2))
-        self.max_retries = int(revise_cfg.get("max_retries_per_round", 1))
+        self.max_retries = int(revise_cfg.get("max_retries_per_round", 0))
         self.initial_sampling = revise_cfg.get("initial_sampling", "uniform")
         self.include_timestamps = bool(revise_cfg.get("include_timestamps", True))
         self.system_prompt_template = revise_cfg.get("system_prompt_template", DEFAULT_SYSTEM_PROMPT)
