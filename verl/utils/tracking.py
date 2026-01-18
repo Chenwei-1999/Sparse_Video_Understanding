@@ -67,6 +67,11 @@ class Tracking:
 
             import wandb
 
+            # Default to online logging when credentials exist; otherwise keep runs offline to avoid interactive login
+            # prompts or hard failures in batch jobs.
+            if "WANDB_MODE" not in os.environ:
+                os.environ["WANDB_MODE"] = "online" if os.environ.get("WANDB_API_KEY") else "offline"
+
             settings = None
             if config and config["trainer"].get("wandb_proxy", None):
                 settings = wandb.Settings(https_proxy=config["trainer"]["wandb_proxy"])
