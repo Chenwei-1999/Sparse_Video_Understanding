@@ -40,38 +40,39 @@ DEFAULT_SYSTEM_PROMPT = (
     "If you are NOT confident, request MORE video frames to view NEXT.\n"
     "Frames are sampled at ~1 fps; frame index ≈ timestamp in seconds.\n\n"
     "IMPORTANT: Output must follow EXACTLY ONE of the two formats below. Do not output any text outside tags.\n"
+    "Output ONLY <summary> plus either <frames> (request) OR <answer> (final).\n"
+    "Do NOT output <think>.\n"
     "Do NOT output placeholders like '...', 'none', 'unknown', or 'N/A' in your final output.\n\n"
     "Format 1 — Request more frames (use this only if NOT confident):\n"
-    "<think>I am not confident yet; I need more visual evidence to confirm my current hypothesis.</think>\n"
-    "<summary>O: George seems to pause and think about something, then begins checking the items inside the shelves; "
+    "<summary>P: the agent has already seen frames 4, 8, and 12; "
+    "O: George seems to pause and think about something, then begins checking the items inside the shelves; "
     "H: his curiosity appears connected to the objects he finds or examines on the shelves; "
-    "R: looking at later frames may help confirm what exactly caught his attention or what he discovered; "
-    "P: the agent has already seen frames 4, 8, and 12; "
-    "U: it is still unclear what first caused his curiosity or made him start investigating</summary>\n"
+    "U: it is still unclear what first caused his curiosity or made him start investigating; "
+    "R: looking at later frames may help confirm what exactly caught his attention or what he discovered</summary>\n"
     "<frames>18, 24</frames>\n\n"
     "Format 2 — Answer now (use this if confident):\n"
-    "<think>I am confident now; the observed evidence matches my hypothesis.</think>\n"
-    "<summary>O: the key evidence is visible in the shown frames; "
+    "<summary>P: the agent has already seen frames 0, 12, 18, and 24; "
+    "O: the key evidence is visible in the shown frames; "
     "H: my belief is updated based on the observed evidence; "
-    "R: answered; "
-    "P: the agent has already seen frames 0, 12, 18, and 24; "
-    "U: no remaining ambiguity that affects the answer</summary>\n"
+    "U: no remaining ambiguity that affects the answer; "
+    "R: answered</summary>\n"
     "<answer>B</answer>\n\n"
     "Tag meanings:\n"
-    "- <think>: 1–2 short sentences describing your decision (NOT the final answer).\n"
     "- <summary>: the ONLY persistent memory across rounds. Keep it short and update it EVERY round.\n"
+    "  The summary MUST be written in this exact order: P → O → H → U → R.\n"
+    "  - P (Previously seen): which frames have already been used/seen (write as a sentence; no Python lists).\n"
     "  - O (Observations): what you currently observe in the selected frames.\n"
-    "  - H (Belief updates): your updated belief based on what has been observed so far.\n"
-    "  - R (Reasons): why you need more frames and what evidence you are looking for next.\n"
-    "  - P (Previously seen): which frames have already been used/seen.\n"
-    "  - U (Uncertainties): what is still unknown or ambiguous.\n\n"
+    "  - H (Belief updates): updated belief based on what has been observed so far (do NOT include the final answer letter).\n"
+    "  - U (Uncertainties): what is still unknown or ambiguous.\n"
+    "  - R (Reasons): why you need more frames and what evidence you are looking for next (or 'answered').\n\n"
     "Rules:\n"
     "- Frame indices are 0-based in [0, L-1].\n"
     "- If you are confident, answer instead of requesting more frames.\n"
     "- If requesting, choose 1 to {max_frames_per_round} NEW frames to view NEXT.\n"
     "- Do NOT output any frame index from the Seen frames list; those are already viewed.\n"
     "- In <frames>, output comma-separated integers only (no brackets, no text).\n"
-    "- In <summary>, include O/H/R/P/U as short natural-language sentences that reflect your current understanding.\n"
+    "- In <summary>, include P/O/H/U/R as short natural-language sentences that reflect your current understanding.\n"
+    "- The order inside <summary> MUST be: P then O then H then U then R.\n"
     "- In P, describe previously seen frames in a sentence (e.g., 'the agent has already seen frames 4, 8, and 12'); "
     "do NOT use Python list formatting like [4, 8, 12].\n"
     "- In <answer>, output EXACTLY ONE option letter shown in the question (e.g., A/B/C/D/E). No words/punctuation.\n"
@@ -119,7 +120,14 @@ def _summary_has_ohrpu(summary_text: str) -> bool:
     if summary_text is None:
         return False
     s = _collapse_ws(summary_text)
-    return all(re.search(rf"\b{k}\s*:\s*", s, re.IGNORECASE) for k in ["O", "H", "R", "P", "U"])
+    keys = ["P", "O", "H", "U", "R"]
+    positions = []
+    for key in keys:
+        m = re.search(rf"\b{key}\s*:\s*", s, re.IGNORECASE)
+        if m is None:
+            return False
+        positions.append(m.start())
+    return all(a < b for a, b in zip(positions, positions[1:], strict=False))
 
 
 def _parse_frame_indices(text: str) -> list[int]:
@@ -364,11 +372,11 @@ class ReviseAgentLoop(AgentLoopBase):
 
         # Initial summary state (avoid placeholder tokens like "unknown"/"none" to reduce copying).
         summary_state = (
+            "P: the agent has not seen any frames yet; "
             "O: no reliable observation yet; "
             "H: my belief will be updated based on what is observed; "
-            "R: need evidence from frames; "
-            "P: the agent has not seen any frames yet; "
-            "U: key detail is still unclear"
+            "U: key detail is still unclear; "
+            "R: need evidence from frames"
         )
 
         # Sample initial frames
@@ -530,15 +538,15 @@ class ReviseAgentLoop(AgentLoopBase):
             messages.append({"role": "assistant", "content": last_response_text})
 
             # Parse model output
-            think = _extract_tag(last_response_text, _THINK_RE)
             answer = _extract_tag(last_response_text, _ANSWER_RE)
             frames_text = _extract_tag(last_response_text, _FRAMES_RE)
             summary = _extract_tag(last_response_text, _SUMMARY_RE)
 
-            if think is None or _is_placeholder(think):
+            think = _extract_tag(last_response_text, _THINK_RE)
+            if think is not None:
                 feedback = (
-                    "Invalid response: <think> is missing or a placeholder. "
-                    "Provide 1–2 short sentences describing your decision (not the final answer)."
+                    "Invalid response: do NOT output <think>. "
+                    "Output ONLY <summary> plus either <frames> (request) or <answer> (final)."
                 )
                 if not await _retry_invalid(feedback, force_answer=bool(answer)):
                     break
@@ -547,7 +555,7 @@ class ReviseAgentLoop(AgentLoopBase):
             if answer:
                 if summary is None or _is_placeholder(summary) or not _summary_has_ohrpu(summary):
                     feedback = (
-                        "Invalid response: when answering, include a meaningful <summary> with O/H/R/P/U "
+                        "Invalid response: when answering, include a meaningful <summary> with P/O/H/U/R in that exact order "
                         "(no placeholders like '.../none/unknown')."
                     )
                     if not await _retry_invalid(feedback, force_answer=True):
@@ -583,7 +591,7 @@ class ReviseAgentLoop(AgentLoopBase):
             if summary is None or _is_placeholder(summary) or not _summary_has_ohrpu(summary):
                 feedback = (
                     "Invalid response: missing or invalid <summary> tag. "
-                    "Include a meaningful <summary> with O/H/R/P/U (no placeholders like '.../none/unknown')."
+                    "Include a meaningful <summary> with P/O/H/U/R in that exact order (no placeholders like '.../none/unknown')."
                 )
                 if not await _retry_invalid(feedback):
                     break

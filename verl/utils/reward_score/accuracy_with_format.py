@@ -9,11 +9,11 @@ _SUMMARY_RE = re.compile(r"<summary>(.*?)</summary>", re.DOTALL | re.IGNORECASE)
 _THINK_RE = re.compile(r"<think>(.*?)</think>", re.DOTALL | re.IGNORECASE)
 
 _STRICT_SELECT_RE = re.compile(
-    r"^\s*<think>.*?</think>\s*<summary>.*?</summary>\s*<frames>\s*\d+(?:\s*,\s*\d+)*\s*</frames>\s*$",
+    r"^\s*<summary>.*?</summary>\s*<frames>\s*\d+(?:\s*,\s*\d+)*\s*</frames>\s*$",
     re.DOTALL | re.IGNORECASE,
 )
 _STRICT_ANSWER_RE = re.compile(
-    r"^\s*<think>.*?</think>\s*<summary>.*?</summary>\s*<answer>\s*([A-E])\s*</answer>\s*$",
+    r"^\s*<summary>.*?</summary>\s*<answer>\s*([A-E])\s*</answer>\s*$",
     re.DOTALL | re.IGNORECASE,
 )
 
@@ -92,14 +92,23 @@ def _summary_quality(summary_text: str, num_choices: int) -> float:
     if _is_placeholder(summary):
         return 0.0
 
-    # Require O/H/R/P/U labels.
-    for key in ["O", "H", "R", "P", "U"]:
+    # Require P/O/H/U/R labels in this order.
+    order = ["P", "O", "H", "U", "R"]
+    for key in order:
         if re.search(rf"\b{key}\s*:", summary, re.IGNORECASE) is None:
             return 0.0
+    positions = []
+    for key in order:
+        m = re.search(rf"\b{key}\s*:\s*", summary, re.IGNORECASE)
+        if m is None:
+            return 0.0
+        positions.append(m.start())
+    if not all(a < b for a, b in zip(positions, positions[1:], strict=False)):
+        return 0.0
 
     def _field(key: str) -> str | None:
         m = re.search(
-            rf"\b{key}\s*:\s*(.*?)(?=\b(?:O|H|R|P|U)\s*:|$)",
+            rf"\b{key}\s*:\s*(.*?)(?=\b(?:P|O|H|U|R)\s*:|$)",
             summary,
             re.IGNORECASE | re.DOTALL,
         )
@@ -107,19 +116,19 @@ def _summary_quality(summary_text: str, num_choices: int) -> float:
             return None
         return _collapse_ws(m.group(1))
 
+    p_text = _field("P")
     o_text = _field("O")
     h_text = _field("H")
-    r_text = _field("R")
-    p_text = _field("P")
     u_text = _field("U")
+    r_text = _field("R")
     if any(v is None for v in [o_text, h_text, r_text, p_text, u_text]):
         return 0.0
 
-    # Reward informative, non-placeholder content for O/H/R/U.
+    # Reward informative, non-placeholder content for O/H/U/R.
     o_q = _text_quality(o_text, min_words=4)
     h_q = _text_quality(h_text, min_words=4)
-    r_q = _text_quality(r_text, min_words=4)
     u_q = _text_quality(u_text, min_words=4)
+    r_q = _text_quality(r_text, min_words=4)
 
     # P: must include at least one frame index and avoid Python list formatting like "[4, 8, 12]".
     p_q = 1.0
@@ -177,8 +186,9 @@ def compute_score(
     else:
         format_strict = float(_STRICT_SELECT_RE.match(final_response) is not None)
 
-    think_text = _extract_tag(final_response, _THINK_RE) or ""
-    think_quality = float(_text_quality(think_text, min_words=4))
+    # The REVISE protocol may omit <think>; do not penalize missing <think>.
+    think_text = _extract_tag(final_response, _THINK_RE)
+    think_quality = 1.0 if think_text is None else float(_text_quality(think_text, min_words=4))
 
     summary_text = str(revise_info.get("summary") or _extract_tag(final_response, _SUMMARY_RE) or "")
     summary_present = float(bool(summary_text))

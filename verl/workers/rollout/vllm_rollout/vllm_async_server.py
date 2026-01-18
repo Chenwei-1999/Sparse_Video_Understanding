@@ -505,14 +505,18 @@ class vLLMHttpServer:
             # instead of raising, to avoid crashing the engine core process.
             return TokenOutput(token_ids=[], log_probs=None, routed_experts=None, stop_reason="aborted")
 
-        # Determine max_tokens from sampling_params or use configured response_length as default
+        # Determine max_tokens from sampling_params or use a conservative per-call cap.
+        #
+        # NOTE: `response_length` is also used as a padding budget for RL trajectories and can be large.
+        # For multi-turn agent loops, leaving per-call generation unconstrained can produce extremely long
+        # responses and destabilize training. Prefer `max_new_tokens` (if set) as the default per-call cap.
         if "max_tokens" in sampling_params:
             max_tokens = sampling_params.pop("max_tokens")
         elif "max_new_tokens" in sampling_params:
             # support sglang-style 'max_new_tokens' param
             max_tokens = sampling_params.pop("max_new_tokens")
         else:
-            max_tokens = self.config.response_length
+            max_tokens = self.config.get("max_new_tokens", self.config.response_length)
 
         # Clamp max_tokens to the valid range [0, max_possible_tokens]
         max_tokens = max(0, min(max_tokens, max_possible_tokens))
