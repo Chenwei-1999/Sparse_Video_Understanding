@@ -168,8 +168,13 @@ def _build_user_content(
     timestamps: list[Optional[float]],
     seen_frames: list[int],
 ) -> str:
+    if question_block:
+        header = f"Round {round_idx} / Question:\n{question_block}"
+    else:
+        header = f"Round {round_idx} (same question/options as Round 1)."
+
     lines = [
-        f"Round {round_idx} / Question:\n{question_block}",
+        header,
         f"Total frames L = {frame_count}.",
         f"Seen frames: {seen_frames}",
         "Current summary:",
@@ -227,6 +232,7 @@ class ReviseAgentLoop(AgentLoopBase):
         cfg = self.config
         self.prompt_length = cfg.actor_rollout_ref.rollout.prompt_length
         self.response_length = cfg.actor_rollout_ref.rollout.response_length
+        self.max_model_len = int(cfg.actor_rollout_ref.rollout.get("max_model_len", self.prompt_length))
         revise_cfg = cfg.actor_rollout_ref.rollout.get("revise", {})
 
         self.max_rounds = int(revise_cfg.get("max_rounds", 4))
@@ -328,6 +334,34 @@ class ReviseAgentLoop(AgentLoopBase):
         )
 
         prompt_ids = await self.apply_chat_template(messages, images=all_images)
+        # Guard against rare cases where vision tokens make the prompt exceed vLLM's
+        # max_model_len (e.g., very large frames). Fall back to fewer initial frames.
+        # Keep some extra headroom beyond max_new_tokens to avoid max_possible_tokens=0 edge cases.
+        min_generation_room = int(self.response_length) + 32
+        max_prompt_len = max(0, self.max_model_len - min_generation_room)
+        while len(prompt_ids) > max_prompt_len and all_images:
+            all_images = all_images[:-1]
+            init_frames = init_frames[: len(all_images)]
+            seen_frames = seen_frames[: len(all_images)]
+            timestamps = timestamps[: len(all_images)]
+
+            user_content = _build_user_content(
+                question_block,
+                summary_state,
+                frame_count,
+                round_idx=1,
+                frame_indices=init_frames,
+                timestamps=timestamps,
+                seen_frames=seen_frames,
+            )
+            messages = _with_images(
+                [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_content},
+                ],
+                all_images,
+            )
+            prompt_ids = await self.apply_chat_template(messages, images=all_images)
         response_mask: list[int] = []
         response_logprobs: list[float] = []
 
@@ -340,14 +374,26 @@ class ReviseAgentLoop(AgentLoopBase):
         for round_idx in range(1, self.max_rounds + 1):
             num_rounds = round_idx
 
-            with simple_timer("generate_sequences", {}):
-                output = await self.server_manager.generate(
-                    request_id=uuid4().hex,
-                    prompt_ids=prompt_ids,
-                    sampling_params=sampling_params,
-                    image_data=all_images,
-                    video_data=None,
+            if len(prompt_ids) >= self.max_model_len:
+                logger.warning(
+                    "Prompt already at/over max_model_len (%s >= %s); stopping sample early.",
+                    len(prompt_ids),
+                    self.max_model_len,
                 )
+                break
+
+            with simple_timer("generate_sequences", {}):
+                try:
+                    output = await self.server_manager.generate(
+                        request_id=uuid4().hex,
+                        prompt_ids=prompt_ids,
+                        sampling_params=sampling_params,
+                        image_data=all_images,
+                        video_data=None,
+                    )
+                except Exception as exc:
+                    logger.warning("vLLM generation failed (%s); stopping sample early.", exc)
+                    break
 
             # Update response tracking
             response_ids = output.token_ids
@@ -499,41 +545,76 @@ class ReviseAgentLoop(AgentLoopBase):
                 valid_requested = valid_requested[:slots_left]
 
             summary_state = summary
-            new_images, fps = _extract_frames(video_path, valid_requested)
-            timestamps = []
+            candidate_images, fps = _extract_frames(video_path, valid_requested)
+            candidate_timestamps: list[Optional[float]] = []
             for idx in valid_requested:
                 if self.include_timestamps and fps:
-                    timestamps.append(idx / fps)
+                    candidate_timestamps.append(idx / fps)
                 else:
-                    timestamps.append(None)
+                    candidate_timestamps.append(None)
 
-            all_images.extend(new_images)
-            seen_frames.extend(valid_requested)
+            # Guard against vLLM context overflow (prompt must be <= max_model_len).
+            # Images can contribute many tokens; for rare near-limit cases, reduce the
+            # number of frames added for the next round and leave headroom to answer.
+            min_generation_room = int(self.response_length) + 32
+            max_prompt_len = max(0, self.max_model_len - min_generation_room)
 
-            user_content = _build_user_content(
-                question_block,
-                summary_state,
-                frame_count,
-                round_idx=round_idx + 1,
-                frame_indices=valid_requested,
-                timestamps=timestamps,
-                seen_frames=seen_frames,
-            )
-            add_messages = _with_images(
-                [{"role": "user", "content": user_content}],
-                new_images,
-            )
-            messages.extend(add_messages)
+            selected_frames: list[int] = []
+            selected_images: list[Image.Image] = []
+            selected_user_ids: Optional[list[int]] = None
+            selected_messages: Optional[list[dict[str, Any]]] = None
 
-            user_ids = await self.apply_chat_template(
-                add_messages,
-                images=new_images,
-                remove_system_prompt=True,
-            )
-            prompt_ids += user_ids
-            response_mask += [0] * len(user_ids)
+            for k in range(len(valid_requested), 0, -1):
+                trial_frames = valid_requested[:k]
+                trial_images = candidate_images[:k]
+                trial_timestamps = candidate_timestamps[:k]
+
+                trial_user_content = _build_user_content(
+                    "",
+                    summary_state,
+                    frame_count,
+                    round_idx=round_idx + 1,
+                    frame_indices=trial_frames,
+                    timestamps=trial_timestamps,
+                    seen_frames=seen_frames + trial_frames,
+                )
+                trial_messages = _with_images(
+                    [{"role": "user", "content": trial_user_content}],
+                    trial_images,
+                )
+                trial_user_ids = await self.apply_chat_template(
+                    trial_messages,
+                    images=trial_images,
+                    remove_system_prompt=True,
+                )
+
+                if len(prompt_ids) + len(trial_user_ids) <= max_prompt_len:
+                    selected_frames = trial_frames
+                    selected_images = trial_images
+                    selected_user_ids = trial_user_ids
+                    selected_messages = trial_messages
+                    break
+
+            if selected_user_ids is None or selected_messages is None:
+                feedback = "Context length limit reached. Provide the final answer now using <answer> tags."
+                await self._retry_with_feedback(
+                    feedback,
+                    messages,
+                    prompt_ids,
+                    response_mask,
+                    response_logprobs,
+                    retries_left,
+                    force_answer=True,
+                )
+                continue
+
+            all_images.extend(selected_images)
+            seen_frames.extend(selected_frames)
+            messages.extend(selected_messages)
+            prompt_ids += selected_user_ids
+            response_mask += [0] * len(selected_user_ids)
             if response_logprobs:
-                response_logprobs += [0.0] * len(user_ids)
+                response_logprobs += [0.0] * len(selected_user_ids)
 
         # If no answer was produced, force a final answer attempt
         if answer_text is None:
@@ -547,22 +628,31 @@ class ReviseAgentLoop(AgentLoopBase):
                 retries_left,
                 force_answer=True,
             )
-            output = await self.server_manager.generate(
-                request_id=uuid4().hex,
-                prompt_ids=prompt_ids,
-                sampling_params=sampling_params,
-                image_data=all_images,
-                video_data=None,
-            )
-            response_ids = output.token_ids
-            prompt_ids += response_ids
-            response_mask += [1] * len(response_ids)
-            if output.log_probs:
-                response_logprobs += output.log_probs
-            last_response_text = self.tokenizer.decode(response_ids, skip_special_tokens=True)
-            messages.append({"role": "assistant", "content": last_response_text})
-            answer_text = _extract_tag(last_response_text, _ANSWER_RE)
-            format_valid = answer_text is not None
+            if len(prompt_ids) < self.max_model_len:
+                try:
+                    output = await self.server_manager.generate(
+                        request_id=uuid4().hex,
+                        prompt_ids=prompt_ids,
+                        sampling_params=sampling_params,
+                        image_data=all_images,
+                        video_data=None,
+                    )
+                except Exception as exc:
+                    logger.warning("vLLM final-answer generation failed (%s); leaving answer empty.", exc)
+                    output = None
+            else:
+                output = None
+
+            if output is not None:
+                response_ids = output.token_ids
+                prompt_ids += response_ids
+                response_mask += [1] * len(response_ids)
+                if output.log_probs:
+                    response_logprobs += output.log_probs
+                last_response_text = self.tokenizer.decode(response_ids, skip_special_tokens=True)
+                messages.append({"role": "assistant", "content": last_response_text})
+                answer_text = _extract_tag(last_response_text, _ANSWER_RE)
+                format_valid = answer_text is not None
 
         # Prepare output
         response_ids = prompt_ids[-len(response_mask) :] if response_mask else []

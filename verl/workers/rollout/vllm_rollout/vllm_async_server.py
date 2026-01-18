@@ -494,14 +494,16 @@ class vLLMHttpServer:
         priority: int = 0,
     ) -> TokenOutput:
         """Generate sequence with token-in-token-out."""
+        # Do not mutate the caller's dict (the same object can be reused across turns).
+        sampling_params = dict(sampling_params)
+
         # Calculate the maximum possible new tokens based on available context space
         # This serves as a safety upper bound
         max_possible_tokens = self.config.max_model_len - len(prompt_ids)
-        if max_possible_tokens < 0:
-            raise ValueError(
-                f"Prompt length ({len(prompt_ids)}) exceeds the model's maximum context length "
-                f"({self.config.max_model_len})."
-            )
+        if max_possible_tokens <= 0:
+            # No room to generate (or prompt already overflows). Return an empty output
+            # instead of raising, to avoid crashing the engine core process.
+            return TokenOutput(token_ids=[], log_probs=None, routed_experts=None, stop_reason="aborted")
 
         # Determine max_tokens from sampling_params or use configured response_length as default
         if "max_tokens" in sampling_params:
@@ -510,11 +512,12 @@ class vLLMHttpServer:
             # support sglang-style 'max_new_tokens' param
             max_tokens = sampling_params.pop("max_new_tokens")
         else:
-            # Default to a calculation that considers configured lengths
-            max_tokens = self.config.response_length + self.config.prompt_length - len(prompt_ids)
+            max_tokens = self.config.response_length
 
         # Clamp max_tokens to the valid range [0, max_possible_tokens]
         max_tokens = max(0, min(max_tokens, max_possible_tokens))
+        if max_tokens <= 0:
+            return TokenOutput(token_ids=[], log_probs=None, routed_experts=None, stop_reason="aborted")
 
         assert max_tokens <= max_possible_tokens, (
             f"max_tokens {max_tokens} exceeds available context space {max_possible_tokens}"
