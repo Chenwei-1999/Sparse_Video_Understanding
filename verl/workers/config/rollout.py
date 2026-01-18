@@ -142,6 +142,11 @@ class RolloutConfig(BaseConfig):
 
     prompt_length: int = 512
     response_length: int = 512
+    # Optional per-request generation cap. When set, the rollout engine will use this
+    # value (via sampling params) instead of `response_length` as `max_new_tokens`.
+    # This allows keeping large padding budgets for multi-turn trajectories while
+    # keeping each assistant turn short.
+    max_new_tokens: Optional[int] = None
 
     dtype: str = "bfloat16"
     gpu_memory_utilization: float = 0.5

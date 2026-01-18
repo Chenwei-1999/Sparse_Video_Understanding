@@ -20,7 +20,9 @@ data:
   train_files: /shares/hlw3876/chenwei/NExT-QA/nextqa/train.csv
   val_files: /shares/hlw3876/chenwei/NExT-QA/nextqa/val.csv
   max_prompt_length: 8192
-  max_response_length: 128
+  # IMPORTANT: multi-round REVISE trajectories can be long (especially with vision tokens).
+  # Keep a large padding budget to avoid truncation-related shape mismatches in VLM RoPE indexing.
+  max_response_length: 4096
   train_batch_size: 2
   dataloader_num_workers: 0
   return_raw_chat: True
@@ -49,6 +51,8 @@ actor_rollout_ref:
     name: vllm
     prompt_length: ${data.max_prompt_length}
     response_length: ${data.max_response_length}
+    # vLLM per-call generation cap (kept small for speed), decoupled from padding budget above.
+    max_new_tokens: 128
     temperature: 0.2
     top_p: 0.9
     do_sample: True
@@ -64,7 +68,8 @@ actor_rollout_ref:
     data_parallel_size: 1
     tensor_model_parallel_size: 4
     pipeline_model_parallel_size: 1
-    limit_images: 5
+    # REVISE accumulates frames across rounds; allow up to max_rounds * max_frames_per_round.
+    limit_images: 25
     agent:
       default_agent_loop: revise_agent
       rollout_mode: hybrid
@@ -97,4 +102,3 @@ trainer:
 ray_kwargs:
   ray_init:
     num_cpus: 32
-

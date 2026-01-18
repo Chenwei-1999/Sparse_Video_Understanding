@@ -279,7 +279,7 @@ class vLLMHttpServer:
             top_k=self.config.top_k,
             top_p=self.config.top_p,
             repetition_penalty=1.0,
-            max_new_tokens=self.config.response_length,
+            max_new_tokens=self.config.get("max_new_tokens", self.config.response_length),
         )
         logger.info(f"override_generation_config: {override_generation_config}")
 

@@ -27,25 +27,31 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 _SUMMARY_RE = re.compile(r"<summary>(.*?)</summary>", re.DOTALL | re.IGNORECASE)
 _FRAMES_RE = re.compile(r"<frames>(.*?)</frames>", re.DOTALL | re.IGNORECASE)
 _ANSWER_RE = re.compile(r"<answer>(.*?)</answer>", re.DOTALL | re.IGNORECASE)
+_THINK_RE = re.compile(r"<think>(.*?)</think>", re.DOTALL | re.IGNORECASE)
+
+_PLACEHOLDER_SET = {"...", "…", "none", "n/a", "na", "null", "unknown", "unsure", "uncertain"}
 
 
 DEFAULT_SYSTEM_PROMPT = (
     "You are REVISE, a multi-round video reasoning agent.\n"
     "Each round you will see: (1) a multiple-choice question with options, (2) the current belief summary, "
     "and (3) a few sampled video frames.\n"
-    "Goal: answer the question as soon as you have a best guess.\n"
-    "Request more frames ONLY if the current frames are insufficient to choose among the options.\n\n"
-    "IMPORTANT: Output must follow EXACTLY ONE of the two formats below. Do not output any text outside tags.\n\n"
-    "Format 1 — Select more frames (use this only if NOT confident):\n"
-    "<think>...</think>\n"
-    "<summary>O: ...; H: ...; R: ...; P: ...; U: ...</summary>\n"
-    "<frames>i, j, k</frames>\n\n"
+    "If you are confident, answer the question.\n"
+    "If you are NOT confident, request MORE video frames to view NEXT.\n"
+    "Frames are sampled at ~1 fps; frame index ≈ timestamp in seconds.\n\n"
+    "IMPORTANT: Output must follow EXACTLY ONE of the two formats below. Do not output any text outside tags.\n"
+    "Do NOT output placeholders like '...', 'none', 'unknown', or 'N/A' in your final output.\n\n"
+    "Format 1 — Request more frames (use this only if NOT confident):\n"
+    "<think>I am not confident yet; I need more visual evidence to confirm my current hypothesis.</think>\n"
+    "<summary>O: the critical event is not visible in the current frames; H: B; R: request frames around the key moment; P: [0, 12]; U: whether the key evidence matches option B</summary>\n"
+    "<frames>18, 24</frames>\n\n"
     "Format 2 — Answer now (use this if confident):\n"
-    "<think>...</think>\n"
-    "<answer>LETTER</answer>\n\n"
+    "<think>I am confident now; the observed evidence matches my hypothesis.</think>\n"
+    "<summary>O: the key evidence is visible and matches option B; H: B; R: answered; P: [0, 12, 18, 24]; U: evidence is sufficient to answer</summary>\n"
+    "<answer>B</answer>\n\n"
     "Tag meanings:\n"
-    "- <think>: your private reasoning to decide whether to select or answer.\n"
-    "- <summary>: the ONLY persistent memory across rounds. Keep it short and update it every time you select frames.\n"
+    "- <think>: 1–2 short sentences describing your decision (NOT the final answer).\n"
+    "- <summary>: the ONLY persistent memory across rounds. Keep it short and update it EVERY round.\n"
     "  - O (Observations): what you currently observe in the selected frames.\n"
     "  - H (Hypothesis): updated beliefs and your current answer candidate (include the option letter).\n"
     "  - R (Reasons): why you need more frames and what evidence you are looking for next.\n"
@@ -54,9 +60,13 @@ DEFAULT_SYSTEM_PROMPT = (
     "Rules:\n"
     "- Frame indices are 0-based in [0, L-1].\n"
     "- If you are confident, answer instead of requesting more frames.\n"
-    "- If selecting, request 1 to {max_frames_per_round} NEW frames (not already seen).\n"
-    "- In <frames>, output comma-separated integers only.\n"
+    "- If requesting, choose 1 to {max_frames_per_round} NEW frames to view NEXT.\n"
+    "- Do NOT output any frame index from the Seen frames list; those are already viewed.\n"
+    "- If you are uncertain, still set H to your current best guess letter (exactly one letter).\n"
+    "- In <frames>, output comma-separated integers only (no brackets, no text).\n"
+    "- In <summary>, include O/H/R/P/U. H must contain EXACTLY ONE option letter (do not list multiple).\n"
     "- In <answer>, output EXACTLY ONE option letter shown in the question (e.g., A/B/C/D/E). No words/punctuation.\n"
+    "- Never copy the example text; replace it with information from the current video.\n"
 )
 
 
@@ -65,6 +75,36 @@ def _extract_tag(text: str, tag_re: re.Pattern[str]) -> Optional[str]:
     if not matches:
         return None
     return matches[-1].group(1).strip()
+
+
+def _collapse_ws(text: str) -> str:
+    return re.sub(r"\s+", " ", str(text)).strip()
+
+
+def _is_placeholder(text: str) -> bool:
+    t = _collapse_ws(text).lower()
+    if not t:
+        return True
+    if "..." in t or "…" in t:
+        return True
+    if re.search(r"\b(none|unknown|unsure|uncertain|null|n/a|na)\b", t):
+        return True
+    if t in _PLACEHOLDER_SET:
+        return True
+    if re.fullmatch(r"[.·•…]+", t):
+        return True
+    # Too short: often a placeholder like "ok", "idk", etc.
+    alnum = re.findall(r"[a-z0-9]+", t)
+    if len(alnum) <= 1 and len(t) <= 6:
+        return True
+    return False
+
+
+def _summary_has_ohrpu(summary_text: str) -> bool:
+    if summary_text is None:
+        return False
+    s = _collapse_ws(summary_text)
+    return all(re.search(rf"\b{k}\s*:\s*", s, re.IGNORECASE) for k in ["O", "H", "R", "P", "U"])
 
 
 def _parse_frame_indices(text: str) -> list[int]:
@@ -102,6 +142,47 @@ def _sample_uniform_indices(frame_count: int, n: int) -> list[int]:
     if n <= 1:
         return [frame_count // 2]
     return [int(x) for x in np.linspace(0, frame_count - 1, n)]
+
+
+def _propose_candidate_unseen_frames(
+    frame_count: int,
+    seen: set[int],
+    k: int,
+    rng: random.Random,
+) -> list[int]:
+    """Suggest a small list of unseen frames to help the model avoid repeating seen indices."""
+    if frame_count <= 0 or k <= 0:
+        return []
+    if len(seen) >= frame_count:
+        return []
+
+    seen_sorted = sorted(i for i in seen if 0 <= i < frame_count)
+    anchors = sorted(set([0, frame_count - 1, *seen_sorted]))
+
+    candidates: list[int] = []
+    gaps: list[tuple[int, int, int]] = []
+    for a, b in zip(anchors, anchors[1:], strict=False):
+        if b - a <= 1:
+            continue
+        gaps.append((b - a, a, b))
+    gaps.sort(reverse=True)
+    for _, a, b in gaps:
+        mid = (a + b) // 2
+        for d in (0, -1, 1, -2, 2, -3, 3):
+            idx = mid + d
+            if a < idx < b and idx not in seen and idx not in candidates:
+                candidates.append(idx)
+                break
+        if len(candidates) >= k:
+            return sorted(candidates[:k])
+
+    need = k - len(candidates)
+    if need > 0:
+        remaining = [i for i in range(frame_count) if i not in seen and i not in candidates]
+        if remaining:
+            candidates.extend(rng.sample(remaining, k=min(need, len(remaining))))
+
+    return sorted(candidates[:k])
 
 
 def _load_video_meta(video_path: str) -> tuple[Optional[int], Optional[float]]:
@@ -176,10 +257,10 @@ def _build_user_content(
     lines = [
         header,
         f"Total frames L = {frame_count}.",
-        f"Seen frames: {seen_frames}",
+        f"Seen frames (already viewed; do NOT request these again): {seen_frames}",
         "Current summary:",
         f"<summary>{summary}</summary>",
-        "Frames for this round:",
+        "Frames shown in this round:",
     ]
     for idx, ts in zip(frame_indices, timestamps, strict=False):
         if ts is not None:
@@ -232,12 +313,14 @@ class ReviseAgentLoop(AgentLoopBase):
         cfg = self.config
         self.prompt_length = cfg.actor_rollout_ref.rollout.prompt_length
         self.response_length = cfg.actor_rollout_ref.rollout.response_length
+        # NOTE: response_length is a padding/trajectory budget; generation is capped separately.
+        self.max_new_tokens = int(cfg.actor_rollout_ref.rollout.get("max_new_tokens", self.response_length))
         self.max_model_len = int(cfg.actor_rollout_ref.rollout.get("max_model_len", self.prompt_length))
         revise_cfg = cfg.actor_rollout_ref.rollout.get("revise", {})
 
         self.max_rounds = int(revise_cfg.get("max_rounds", 4))
         self.max_frames_per_round = int(revise_cfg.get("max_frames_per_round", 3))
-        # Qwen2.5-VL currently supports up to 2 vision inputs; keep a hard cap.
+        # Cap the total number of vision inputs carried across multi-round context.
         self.max_vision_inputs = int(revise_cfg.get("max_vision_inputs", 2))
         self.max_retries = int(revise_cfg.get("max_retries_per_round", 1))
         self.initial_sampling = revise_cfg.get("initial_sampling", "uniform")
@@ -264,8 +347,8 @@ class ReviseAgentLoop(AgentLoopBase):
 
         rng = random.Random(self.seed)
 
-        # Initial summary state
-        summary_state = "O: none; H: none; R: need evidence; P: []; U: unknown"
+        # Initial summary state (avoid placeholder tokens like "unknown"/"none" to reduce copying).
+        summary_state = "O: no reliable observation yet; H: A; R: need evidence from frames; P: []; U: key detail unclear"
 
         # Sample initial frames
         if self.initial_sampling == "random" and frame_count > 0:
@@ -337,7 +420,7 @@ class ReviseAgentLoop(AgentLoopBase):
         # Guard against rare cases where vision tokens make the prompt exceed vLLM's
         # max_model_len (e.g., very large frames). Fall back to fewer initial frames.
         # Keep some extra headroom beyond max_new_tokens to avoid max_possible_tokens=0 edge cases.
-        min_generation_room = int(self.response_length) + 32
+        min_generation_room = int(self.max_new_tokens) + 32
         max_prompt_len = max(0, self.max_model_len - min_generation_room)
         while len(prompt_ids) > max_prompt_len and all_images:
             all_images = all_images[:-1]
@@ -369,8 +452,28 @@ class ReviseAgentLoop(AgentLoopBase):
         answer_text: Optional[str] = None
         format_valid = False
         last_response_text = ""
+        invalid_outputs = 0
+        total_retries = 0
+        frames_all_seen = 0
 
         retries_left = [self.max_retries]
+
+        async def _retry_invalid(feedback: str, *, force_answer: bool = False) -> bool:
+            nonlocal invalid_outputs, total_retries
+            invalid_outputs += 1
+            ok = await self._retry_with_feedback(
+                feedback,
+                messages,
+                prompt_ids,
+                response_mask,
+                response_logprobs,
+                retries_left,
+                force_answer=force_answer,
+            )
+            if ok:
+                total_retries += 1
+            return ok
+
         for round_idx in range(1, self.max_rounds + 1):
             num_rounds = round_idx
 
@@ -406,11 +509,29 @@ class ReviseAgentLoop(AgentLoopBase):
             messages.append({"role": "assistant", "content": last_response_text})
 
             # Parse model output
+            think = _extract_tag(last_response_text, _THINK_RE)
             answer = _extract_tag(last_response_text, _ANSWER_RE)
             frames_text = _extract_tag(last_response_text, _FRAMES_RE)
             summary = _extract_tag(last_response_text, _SUMMARY_RE)
 
+            if think is None or _is_placeholder(think):
+                feedback = (
+                    "Invalid response: <think> is missing or a placeholder. "
+                    "Provide 1–2 short sentences describing your decision (not the final answer)."
+                )
+                if not await _retry_invalid(feedback, force_answer=bool(answer)):
+                    break
+                continue
+
             if answer:
+                if summary is None or _is_placeholder(summary) or not _summary_has_ohrpu(summary):
+                    feedback = (
+                        "Invalid response: when answering, include a meaningful <summary> with O/H/R/P/U "
+                        "(no placeholders like '.../none/unknown')."
+                    )
+                    if not await _retry_invalid(feedback, force_answer=True):
+                        break
+                    continue
                 normalized = _normalize_answer_letter(answer, len(choices))
                 if normalized is None:
                     allowed = [chr(ord("A") + i) for i in range(len(choices) or 5)]
@@ -418,17 +539,11 @@ class ReviseAgentLoop(AgentLoopBase):
                         "Invalid response: <answer> must be exactly ONE option letter "
                         f"({', '.join(allowed)}). Do not output words or a sentence."
                     )
-                    if not await self._retry_with_feedback(
-                        feedback,
-                        messages,
-                        prompt_ids,
-                        response_mask,
-                        response_logprobs,
-                        retries_left,
-                        force_answer=True,
-                    ):
+                    if not await _retry_invalid(feedback, force_answer=True):
                         break
                     continue
+                if summary is not None:
+                    summary_state = summary
                 answer_text = normalized
                 format_valid = True
                 break
@@ -436,94 +551,76 @@ class ReviseAgentLoop(AgentLoopBase):
             if frames_text is None:
                 # invalid: missing frames for select
                 feedback = (
-                    "Invalid response: missing <frames> tag for selection. "
-                    "Please follow the required format."
+                    "Invalid response: missing <frames> tag for requesting more frames. "
+                    "Remember: <frames> must list NEW frame indices to view NEXT (not already seen)."
                 )
-                if not await self._retry_with_feedback(
-                    feedback,
-                    messages,
-                    prompt_ids,
-                    response_mask,
-                    response_logprobs,
-                    retries_left,
-                ):
+                if not await _retry_invalid(feedback):
                     break
                 continue
 
             # Validate summary
-            if summary is None:
-                feedback = "Invalid response: missing <summary> tag for selection."
-                if not await self._retry_with_feedback(
-                    feedback,
-                    messages,
-                    prompt_ids,
-                    response_mask,
-                    response_logprobs,
-                    retries_left,
-                ):
+            if summary is None or _is_placeholder(summary) or not _summary_has_ohrpu(summary):
+                feedback = (
+                    "Invalid response: missing or invalid <summary> tag. "
+                    "Include a meaningful <summary> with O/H/R/P/U (no placeholders like '.../none/unknown')."
+                )
+                if not await _retry_invalid(feedback):
                     break
                 continue
 
             requested = _parse_frame_indices(frames_text)
             if not requested:
-                feedback = "Invalid response: <frames> is empty. Provide frame indices."
-                if not await self._retry_with_feedback(
-                    feedback,
-                    messages,
-                    prompt_ids,
-                    response_mask,
-                    response_logprobs,
-                    retries_left,
-                ):
+                feedback = (
+                    "Invalid response: <frames> is empty. "
+                    "Provide 1–{max_k} NEW frame indices to view NEXT (comma-separated). "
+                    "Do not request frames already in Seen frames."
+                ).format(max_k=self.max_frames_per_round)
+                if not await _retry_invalid(feedback):
                     break
                 continue
 
             # Enforce constraints
             requested_unique = [i for i in requested if i not in seen_frames]
             if len(requested_unique) == 0:
-                feedback = "Invalid response: requested frames already seen."
-                if not await self._retry_with_feedback(
-                    feedback,
-                    messages,
-                    prompt_ids,
-                    response_mask,
-                    response_logprobs,
-                    retries_left,
-                ):
+                frames_all_seen += 1
+                candidates = _propose_candidate_unseen_frames(
+                    frame_count=frame_count,
+                    seen=set(seen_frames),
+                    k=max(12, self.max_frames_per_round * 4),
+                    rng=rng,
+                )
+                candidate_text = f" Unseen candidates: {candidates}." if candidates else ""
+                feedback = (
+                    "Invalid response: all requested frames are already seen. "
+                    "In <frames>, output 1–{max_k} NEW indices NOT in the Seen frames list."
+                    + candidate_text
+                ).format(max_k=self.max_frames_per_round)
+                if not await _retry_invalid(feedback):
                     break
                 continue
             if len(requested_unique) > self.max_frames_per_round:
                 feedback = (
-                    f"Invalid response: requested {len(requested_unique)} frames, "
-                    f"exceeds max {self.max_frames_per_round}."
+                    f"Invalid response: requested {len(requested_unique)} NEW frames, "
+                    f"which exceeds max {self.max_frames_per_round}. "
+                    f"Choose at most {self.max_frames_per_round} NEW frames NOT in Seen frames."
                 )
-                if not await self._retry_with_feedback(
-                    feedback,
-                    messages,
-                    prompt_ids,
-                    response_mask,
-                    response_logprobs,
-                    retries_left,
-                ):
+                if not await _retry_invalid(feedback):
                     break
                 continue
 
             # Clip to range
             valid_requested = [i for i in requested_unique if 0 <= i < frame_count]
             if not valid_requested:
-                feedback = "Invalid response: frame indices out of range."
-                if not await self._retry_with_feedback(
-                    feedback,
-                    messages,
-                    prompt_ids,
-                    response_mask,
-                    response_logprobs,
-                    retries_left,
-                ):
+                feedback = (
+                    "Invalid response: frame indices out of range. "
+                    f"Valid range is [0, {max(0, frame_count - 1)}]. "
+                    "Choose NEW frame indices within range and NOT in Seen frames."
+                )
+                if not await _retry_invalid(feedback):
                     break
                 continue
 
-            # Enforce global vision cap (Qwen2.5-VL supports 2 images max)
+            # Enforce a global cap on total images carried across rounds.
             slots_left = self.max_vision_inputs - len(all_images)
             if slots_left <= 0:
                 feedback = (
@@ -556,7 +653,7 @@ class ReviseAgentLoop(AgentLoopBase):
             # Guard against vLLM context overflow (prompt must be <= max_model_len).
             # Images can contribute many tokens; for rare near-limit cases, reduce the
             # number of frames added for the next round and leave headroom to answer.
-            min_generation_room = int(self.response_length) + 32
+            min_generation_room = int(self.max_new_tokens) + 32
             max_prompt_len = max(0, self.max_model_len - min_generation_room)
 
             selected_frames: list[int] = []
@@ -588,7 +685,14 @@ class ReviseAgentLoop(AgentLoopBase):
                     remove_system_prompt=True,
                 )
 
-                if len(prompt_ids) + len(trial_user_ids) <= max_prompt_len:
+                # Also keep trajectory within the configured response_length budget to avoid
+                # truncating inside a vision token block (which can break Qwen2.5-VL RoPE indexing).
+                response_budget_ok = (
+                    len(response_mask) + len(trial_user_ids) + int(self.max_new_tokens) + 16
+                    <= int(self.response_length)
+                )
+
+                if len(prompt_ids) + len(trial_user_ids) <= max_prompt_len and response_budget_ok:
                     selected_frames = trial_frames
                     selected_images = trial_images
                     selected_user_ids = trial_user_ids
@@ -596,7 +700,9 @@ class ReviseAgentLoop(AgentLoopBase):
                     break
 
             if selected_user_ids is None or selected_messages is None:
-                feedback = "Context length limit reached. Provide the final answer now using <answer> tags."
+                feedback = (
+                    "Context/trajectory length limit reached. Provide the final answer now using <answer> tags."
+                )
                 await self._retry_with_feedback(
                     feedback,
                     messages,
@@ -652,6 +758,9 @@ class ReviseAgentLoop(AgentLoopBase):
                 last_response_text = self.tokenizer.decode(response_ids, skip_special_tokens=True)
                 messages.append({"role": "assistant", "content": last_response_text})
                 answer_text = _extract_tag(last_response_text, _ANSWER_RE)
+                forced_summary = _extract_tag(last_response_text, _SUMMARY_RE)
+                if forced_summary is not None:
+                    summary_state = forced_summary
                 format_valid = answer_text is not None
 
         # Prepare output
@@ -665,6 +774,10 @@ class ReviseAgentLoop(AgentLoopBase):
             "summary": summary_state,
             "answer": answer_text,
             "format_valid": format_valid,
+            "last_response": last_response_text,
+            "invalid_outputs": invalid_outputs,
+            "total_retries": total_retries,
+            "frames_all_seen": frames_all_seen,
         }
 
         # Optional: summary-only correctness approximation

@@ -430,6 +430,8 @@ class AgentLoopWorker:
             repetition_penalty=1.0,
             logprobs=config.calculate_log_probs,
         )
+        if getattr(config, "max_new_tokens", None) is not None:
+            sampling_params["max_new_tokens"] = int(config.max_new_tokens)
 
         # override sampling params for validation
         if batch.meta_info.get("validate", False):
@@ -650,21 +652,28 @@ class AgentLoopWorker:
             videos, video_metadatas = list(videos), list(video_metadatas)
         else:
             video_metadatas = None
-        current_text = self.tokenizer.decode(input_ids.squeeze(0), skip_special_tokens=True)
-        multi_modal_inputs = self.processor(
-            text=[current_text],
-            images=images,
-            videos=videos,
-            video_metadatas=video_metadatas,
-            return_tensors="pt",
-            do_sample_frames=False,
-        )
-        multi_modal_inputs.pop("input_ids", None)
-        multi_modal_inputs.pop("attention_mask", None)
+        # NOTE: For Qwen2.5-VL, decoding `input_ids` back to text produces *expanded* `<|image_pad|>`
+        # tokens (many per image). Passing that to the processor makes it think there are more images
+        # than provided and it crashes. Here we only need vision tensors + grid shapes, so prefer the
+        # dedicated vision processors when available.
+        if images is not None and videos is None and hasattr(self.processor, "image_processor"):
+            multi_modal_inputs = dict(self.processor.image_processor(images=images, return_tensors="pt"))
+        else:
+            current_text = self.tokenizer.decode(input_ids.squeeze(0), skip_special_tokens=True)
+            multi_modal_inputs = self.processor(
+                text=[current_text],
+                images=images,
+                videos=videos,
+                video_metadatas=video_metadatas,
+                return_tensors="pt",
+                do_sample_frames=False,
+            )
+            multi_modal_inputs.pop("input_ids", None)
+            multi_modal_inputs.pop("attention_mask", None)
 
-        # We must use dict(multi_modal_inputs) to convert BatchFeature values to a new dict
-        # because np.array() only keeps the keys for BatchFeature.
-        multi_modal_inputs = dict(multi_modal_inputs.convert_to_tensors("pt"))
+            # We must use dict(multi_modal_inputs) to convert BatchFeature values to a new dict
+            # because np.array() only keeps the keys for BatchFeature.
+            multi_modal_inputs = dict(multi_modal_inputs.convert_to_tensors("pt"))
         image_grid_thw = multi_modal_inputs.get("image_grid_thw")
         if image_grid_thw is not None:
             images_seqlens = torch.repeat_interleave(image_grid_thw[:, 1] * image_grid_thw[:, 2], image_grid_thw[:, 0])

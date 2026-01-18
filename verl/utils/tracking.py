@@ -67,10 +67,25 @@ class Tracking:
 
             import wandb
 
-            # Default to online logging when credentials exist; otherwise keep runs offline to avoid interactive login
-            # prompts or hard failures in batch jobs.
+            def _has_wandb_credentials() -> bool:
+                if os.environ.get("WANDB_API_KEY"):
+                    return True
+                if os.environ.get("WANDB_IDENTITY_TOKEN_FILE"):
+                    return True
+                try:
+                    from wandb.sdk.lib.wbauth import wbnetrc
+
+                    base_url = os.environ.get("WANDB_BASE_URL") or "https://api.wandb.ai"
+                    return bool(wbnetrc.read_netrc_auth(host=base_url))
+                except Exception:
+                    return False
+
+            # Default to online logging when credentials exist; otherwise keep runs offline to avoid interactive
+            # login prompts or failures in batch jobs.
             if "WANDB_MODE" not in os.environ:
-                os.environ["WANDB_MODE"] = "online" if os.environ.get("WANDB_API_KEY") else "offline"
+                os.environ["WANDB_MODE"] = "online" if _has_wandb_credentials() else "offline"
+            elif str(os.environ.get("WANDB_MODE", "")).lower() == "online" and not _has_wandb_credentials():
+                os.environ["WANDB_MODE"] = "offline"
 
             settings = None
             if config and config["trainer"].get("wandb_proxy", None):
@@ -171,19 +186,40 @@ class Tracking:
 
     def __del__(self):
         if "wandb" in self.logger:
-            self.logger["wandb"].finish(exit_code=0)
+            try:
+                self.logger["wandb"].finish(exit_code=0)
+            except Exception:
+                pass
         if "swanlab" in self.logger:
-            self.logger["swanlab"].finish()
+            try:
+                self.logger["swanlab"].finish()
+            except Exception:
+                pass
         if "vemlp_wandb" in self.logger:
-            self.logger["vemlp_wandb"].finish(exit_code=0)
+            try:
+                self.logger["vemlp_wandb"].finish(exit_code=0)
+            except Exception:
+                pass
         if "tensorboard" in self.logger:
-            self.logger["tensorboard"].finish()
+            try:
+                self.logger["tensorboard"].finish()
+            except Exception:
+                pass
         if "clearml" in self.logger:
-            self.logger["clearml"].finish()
+            try:
+                self.logger["clearml"].finish()
+            except Exception:
+                pass
         if "trackio" in self.logger:
-            self.logger["trackio"].finish()
+            try:
+                self.logger["trackio"].finish()
+            except Exception:
+                pass
         if "file" in self.logger:
-            self.logger["file"].finish()
+            try:
+                self.logger["file"].finish()
+            except Exception:
+                pass
 
 
 class ClearMLLogger:

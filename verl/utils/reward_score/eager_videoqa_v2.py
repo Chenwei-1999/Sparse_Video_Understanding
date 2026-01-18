@@ -14,8 +14,92 @@ import re
 from typing import Any
 
 _ANSWER_RE = re.compile(r"<answer>(.*?)</answer>", re.DOTALL | re.IGNORECASE)
+_FRAMES_RE = re.compile(r"<frames>(.*?)</frames>", re.DOTALL | re.IGNORECASE)
 _SUMMARY_RE = re.compile(r"<summary>(.*?)</summary>", re.DOTALL | re.IGNORECASE)
+_THINK_RE = re.compile(r"<think>(.*?)</think>", re.DOTALL | re.IGNORECASE)
 _HYP_RE = re.compile(r"\bH\s*:\s*([A-E])\b", re.IGNORECASE)
+
+_STRICT_ANSWER_RE = re.compile(
+    r"^\s*<think>.*?</think>\s*<answer>\s*([A-E])\s*</answer>\s*$",
+    re.DOTALL | re.IGNORECASE,
+)
+_STRICT_SELECT_RE = re.compile(
+    r"^\s*<think>.*?</think>\s*<summary>.*?</summary>\s*<frames>\s*\d+(?:\s*,\s*\d+)*\s*</frames>\s*$",
+    re.DOTALL | re.IGNORECASE,
+)
+
+
+def _collapse_ws(text: str) -> str:
+    return re.sub(r"\s+", " ", str(text)).strip()
+
+
+def _is_placeholder(text: str) -> bool:
+    t = _collapse_ws(text).lower()
+    if not t:
+        return True
+    if t in {"...", "…", "none", "n/a", "na", "null"}:
+        return True
+    if t in {"unknown", "unsure", "uncertain"}:
+        return True
+    if re.fullmatch(r"[.·•…]+", t):
+        return True
+    # Too short: often a placeholder like "ok", "idk", etc.
+    alnum = re.findall(r"[a-z0-9]+", t)
+    if len(alnum) <= 1 and len(t) <= 6:
+        return True
+    return False
+
+
+def _text_quality(text: str, *, min_words: int) -> float:
+    if text is None:
+        return 0.0
+    if _is_placeholder(text):
+        return 0.0
+    words = re.findall(r"[A-Za-z0-9]+", str(text))
+    if len(words) < min_words:
+        return 0.5
+    return 1.0
+
+
+def _summary_quality(summary_text: str, num_choices: int) -> float:
+    """Return 1.0 for well-formed, non-placeholder O/H/R/P/U summary; else 0.0."""
+    if summary_text is None:
+        return 0.0
+    summary = _collapse_ws(summary_text)
+    if _is_placeholder(summary):
+        return 0.0
+
+    # Require O/H/R/P/U labels.
+    required = ["O", "H", "R", "P", "U"]
+    for key in required:
+        if re.search(rf"\b{key}\s*:", summary, re.IGNORECASE) is None:
+            return 0.0
+
+    # Extract H field and ensure exactly one option letter appears.
+    h_match = re.search(r"\bH\s*:\s*([^;]+)", summary, re.IGNORECASE)
+    if not h_match:
+        return 0.0
+    h_field = h_match.group(1)
+    letters = re.findall(r"\b([A-E])\b", h_field, re.IGNORECASE)
+    unique_letters = {l.upper() for l in letters}
+    if len(unique_letters) != 1:
+        return 0.0
+    if _normalize_answer_letter(next(iter(unique_letters)), num_choices) is None:
+        return 0.0
+
+    # Extract P field and require at least one frame index.
+    p_match = re.search(r"\bP\s*:\s*([^;]+)", summary, re.IGNORECASE)
+    if not p_match:
+        return 0.0
+    if not re.findall(r"\d+", p_match.group(1)):
+        return 0.0
+
+    # Avoid placeholder/empty content in O/R/U.
+    for key in ["O", "R", "U"]:
+        m = re.search(rf"\b{key}\s*:\s*([^;]+)", summary, re.IGNORECASE)
+        if not m or _is_placeholder(m.group(1)):
+            return 0.0
+    return 1.0
 
 
 def _extract_tag(text: str, pattern: re.Pattern[str]) -> str | None:
@@ -72,6 +156,9 @@ def compute_score(
     Reward components:
     - answer_correct: 1 if final <answer> matches ground-truth option index.
     - format_valid: 1 if <answer> is present and parsable.
+    - format_strict: 1 if the final assistant message matches exactly one required format (no mixed tags).
+    - think_quality: 0/0.5/1 based on non-placeholder <think> content.
+    - summary_quality: 1 if summary has meaningful O/H/R/P/U structure (only applied when multi-round).
     - summary_hyp_correct: 1 if <summary> contains a single-letter hypothesis matching the label.
     - stop_early: 1 if answer is correct and num_rounds <= stop_round_threshold.
 
@@ -109,23 +196,56 @@ def compute_score(
         num_rounds = extra_info.get("num_turns")
     stop_early = float(answer_correct > 0.0 and num_rounds is not None and int(num_rounds) <= int(stop_round_threshold))
 
+    # Strict format and quality checks should run on the final assistant response only.
+    final_response = str(revise_info.get("last_response") or solution_str)
+    has_answer = _extract_tag(final_response, _ANSWER_RE) is not None
+    if has_answer:
+        strict_match = _STRICT_ANSWER_RE.match(final_response)
+        if strict_match:
+            strict_letter = _normalize_answer_letter(strict_match.group(1), num_choices)
+            format_strict = float(strict_letter is not None)
+        else:
+            format_strict = 0.0
+    else:
+        format_strict = float(_STRICT_SELECT_RE.match(final_response) is not None)
+
+    think_text = _extract_tag(final_response, _THINK_RE) or ""
+    think_quality = float(_text_quality(think_text, min_words=4))
+
+    summary_quality = 1.0
+    if num_rounds is not None and int(num_rounds) > 1:
+        summary_quality = float(_summary_quality(str(summary_text), num_choices))
+
     # Default weights: keep close to accuracy-only while adding small shaping terms.
     weights = reward_weights or {}
     w_answer = float(weights.get("answer", 1.0))
     w_format = float(weights.get("format", 0.1))
     w_sum = float(weights.get("sum", 0.2))
     w_stop = float(weights.get("stop", 0.2))
+    w_strict = float(weights.get("strict", 0.0))
+    w_think = float(weights.get("think", 0.0))
+    w_summary = float(weights.get("summary", 0.0))
 
-    score = w_answer * answer_correct + w_format * format_valid + w_sum * summary_hyp_correct + w_stop * stop_early
+    score = (
+        w_answer * answer_correct
+        + w_format * format_valid
+        + w_sum * summary_hyp_correct
+        + w_stop * stop_early
+        + w_strict * format_strict
+        + w_think * think_quality
+        + w_summary * summary_quality
+    )
 
     return {
         "score": float(score),
         "answer_correct": float(answer_correct),
         "format_valid": float(format_valid),
+        "format_strict": float(format_strict),
+        "think_quality": float(think_quality),
+        "summary_quality": float(summary_quality),
         "summary_hyp_correct": float(summary_hyp_correct),
         "stop_early": float(stop_early),
         "pred_letter": float(ord(pred_letter) - ord("A")) if pred_letter is not None else -1.0,
         "hyp_letter": float(ord(hyp_letter) - ord("A")) if hyp_letter is not None else -1.0,
         "num_rounds": float(num_rounds) if num_rounds is not None else -1.0,
     }
-
