@@ -179,8 +179,6 @@ def _is_placeholder(text: str) -> bool:
         return True
     if "..." in t or "…" in t:
         return True
-    if re.search(r"\b(none|unknown|unsure|uncertain|null|n/a|na)\b", t):
-        return True
     if t in _PLACEHOLDER_SET:
         return True
     if re.fullmatch(r"[.·•…]+", t):
