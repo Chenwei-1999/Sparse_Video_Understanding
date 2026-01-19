@@ -802,7 +802,7 @@ class ReviseAgentLoop(AgentLoopBase):
             if slots_left <= 0:
                 feedback = (
                     f"Vision limit of {self.max_vision_inputs} images reached. "
-                    "Provide the final answer using <answer>...</answer>."
+                    "Provide the final answer using <summary>...</summary> then <answer>LETTER</answer>."
                 )
                 await self._retry_with_feedback(
                     feedback,
@@ -854,7 +854,7 @@ class ReviseAgentLoop(AgentLoopBase):
                     )
 
                 trial_user_content = _build_user_content(
-                    "",
+                    question_block,
                     summary_state,
                     frame_count,
                     round_idx=round_idx + 1,
@@ -892,7 +892,8 @@ class ReviseAgentLoop(AgentLoopBase):
 
             if selected_user_ids is None or selected_messages is None:
                 feedback = (
-                    "Context/trajectory length limit reached. Provide the final answer now using <answer> tags."
+                    "Context/trajectory length limit reached. Provide the final answer now using "
+                    "<summary>...</summary> then <answer>LETTER</answer>."
                 )
                 await self._retry_with_feedback(
                     feedback,
@@ -917,7 +918,9 @@ class ReviseAgentLoop(AgentLoopBase):
 
         # If no answer was produced, force a final answer attempt
         if answer_text is None and terminated_invalid_action == 0:
-            feedback = "Max rounds reached. Provide final answer now using <answer> tags."
+            feedback = (
+                "Max rounds reached. Provide final answer now using <summary>...</summary> then <answer>LETTER</answer>."
+            )
             await self._retry_with_feedback(
                 feedback,
                 messages,
@@ -1035,7 +1038,9 @@ class ReviseAgentLoop(AgentLoopBase):
         if force_answer:
             feedback_text = (
                 f"{feedback}\n"
-                "Use <answer>LETTER</answer> where LETTER is a single option letter (e.g., A/B/C/D/E)."
+                "Output ONLY <summary>...</summary> then <answer>LETTER</answer>. "
+                "In <summary>, include P/O/H/U/R in that exact order. "
+                "In <answer>, LETTER must be a single option letter (e.g., A/B/C/D/E)."
             )
 
         add_messages = [{"role": "user", "content": feedback_text}]
