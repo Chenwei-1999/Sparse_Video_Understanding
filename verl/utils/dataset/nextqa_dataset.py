@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import hashlib
 from dataclasses import dataclass
 from typing import Any, Iterable
 
@@ -58,6 +59,17 @@ def _format_question(question: str, choices: list[str]) -> str:
     if option_labels:
         lines.append(f"Answer with exactly one letter only: {', '.join(option_labels)}.")
     return "\n".join(lines)
+
+
+def _stable_sample_id(video_id: str, question: str, choices: list[str], answer_idx: int) -> str:
+    payload = {
+        "video_id": str(video_id),
+        "question": str(question),
+        "choices": [str(c) for c in (choices or [])],
+        "answer_idx": int(answer_idx),
+    }
+    digest = hashlib.sha1(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
+    return digest
 
 
 class NextQADataset(Dataset):
@@ -136,6 +148,7 @@ class NextQADataset(Dataset):
 
     def __getitem__(self, idx: int) -> dict[str, Any]:
         sample = self.samples[idx]
+        sample_id = _stable_sample_id(sample.video_id, sample.question, sample.choices, sample.answer_idx)
         prompt_text = _format_question(sample.question, sample.choices)
         raw_prompt = [
             {
@@ -150,9 +163,11 @@ class NextQADataset(Dataset):
             "choices": sample.choices,
             "qid": sample.qid,
             "type": sample.qtype,
+            "sample_id": sample_id,
         }
 
         extra_info = {
+            "sample_id": sample_id,
             "video_id": sample.video_id,
             "video_path": sample.video_path,
             "frame_count": sample.frame_count,

@@ -70,6 +70,7 @@ DEFAULT_SYSTEM_PROMPT = (
     "- If you are confident, answer instead of requesting more frames.\n"
     "- If requesting, choose 1 to {max_frames_per_round} NEW frames to view NEXT.\n"
     "- Do NOT output any frame index from the Seen frames list; those are already viewed.\n"
+    "- When provided, request frames ONLY within the allowed unseen frame ranges.\n"
     "- In <frames>, output comma-separated integers only (no brackets, no text).\n"
     "- In <summary>, include P/O/H/U/R as short natural-language sentences that reflect your current understanding.\n"
     "- The order inside <summary> MUST be: P then O then H then U then R.\n"
@@ -95,6 +96,40 @@ def _format_frame_list(frames: list[int]) -> str:
     if not frames:
         return "no frames yet"
     return ", ".join(str(int(i)) for i in frames)
+
+
+def _unseen_intervals(frame_count: int, seen_frames: list[int]) -> list[tuple[int, int]]:
+    """Return unseen frame ranges as inclusive [start, end] intervals."""
+    if frame_count <= 0:
+        return []
+    seen = sorted({int(i) for i in (seen_frames or []) if 0 <= int(i) < frame_count})
+    anchors = [-1, *seen, frame_count]
+    intervals: list[tuple[int, int]] = []
+    for a, b in zip(anchors, anchors[1:], strict=False):
+        start = a + 1
+        end = b - 1
+        if start <= end:
+            intervals.append((start, end))
+    return intervals
+
+
+def _format_intervals(intervals: list[tuple[int, int]]) -> str:
+    if not intervals:
+        return "none"
+    parts: list[str] = []
+    for start, end in intervals:
+        if start == end:
+            parts.append(str(start))
+        else:
+            parts.append(f"{start}-{end}")
+    return "; ".join(parts)
+
+
+def _in_intervals(idx: int, intervals: list[tuple[int, int]]) -> bool:
+    for start, end in intervals:
+        if start <= idx <= end:
+            return True
+    return False
 
 
 def _is_placeholder(text: str) -> bool:
@@ -281,6 +316,10 @@ def _build_user_content(
         header,
         f"Total frames L = {frame_count}.",
         f"Seen frames (already viewed; do NOT request these again): {_format_frame_list(seen_frames)}",
+        (
+            "Allowed unseen frame ranges for <frames> (choose NEW indices only from these ranges): "
+            f"{_format_intervals(_unseen_intervals(frame_count, seen_frames))}"
+        ),
         "Current summary:",
         f"<summary>{summary}</summary>",
         "Frames shown in this round:",
@@ -346,6 +385,7 @@ class ReviseAgentLoop(AgentLoopBase):
         # Cap the total number of vision inputs carried across multi-round context.
         self.max_vision_inputs = int(revise_cfg.get("max_vision_inputs", 2))
         self.max_retries = int(revise_cfg.get("max_retries_per_round", 0))
+        self.terminate_on_invalid_action = bool(revise_cfg.get("terminate_on_invalid_action", True))
         self.initial_sampling = revise_cfg.get("initial_sampling", "uniform")
         self.include_timestamps = bool(revise_cfg.get("include_timestamps", True))
         self.system_prompt_template = revise_cfg.get("system_prompt_template", DEFAULT_SYSTEM_PROMPT)
@@ -482,14 +522,36 @@ class ReviseAgentLoop(AgentLoopBase):
         format_valid = False
         last_response_text = ""
         invalid_outputs = 0
+        invalid_attempts = 0
         total_retries = 0
         frames_all_seen = 0
+        effective_rounds = 0
+        terminated_reason: Optional[str] = None
+        terminated_invalid_action = 0
 
         retries_left = [self.max_retries]
 
-        async def _retry_invalid(feedback: str, *, force_answer: bool = False) -> bool:
-            nonlocal invalid_outputs, total_retries
+        illegal_reasons = {
+            # Action contract violations (should never yield progress/new frames).
+            "missing_frames_tag",
+            "empty_frames",
+            "frames_all_seen",
+            "too_many_frames",
+            "frames_out_of_range",
+            # Hard protocol violations.
+            "invalid_think",
+            "invalid_answer_letter",
+        }
+
+        async def _handle_invalid(reason: str, feedback: str, *, force_answer: bool = False) -> bool:
+            nonlocal invalid_outputs, invalid_attempts, total_retries
+            nonlocal terminated_reason, terminated_invalid_action
             invalid_outputs += 1
+            invalid_attempts += 1
+            terminated_reason = reason
+            if self.terminate_on_invalid_action and reason in illegal_reasons:
+                terminated_invalid_action = 1
+                return False
             ok = await self._retry_with_feedback(
                 feedback,
                 messages,
@@ -548,19 +610,16 @@ class ReviseAgentLoop(AgentLoopBase):
                     "Invalid response: do NOT output <think>. "
                     "Output ONLY <summary> plus either <frames> (request) or <answer> (final)."
                 )
-                if not await _retry_invalid(feedback, force_answer=bool(answer)):
+                if not await _handle_invalid("invalid_think", feedback, force_answer=bool(answer)):
                     break
                 continue
 
             if answer:
                 if summary is None or _is_placeholder(summary) or not _summary_has_ohrpu(summary):
-                    feedback = (
-                        "Invalid response: when answering, include a meaningful <summary> with P/O/H/U/R in that exact order "
-                        "(no placeholders like '.../none/unknown')."
-                    )
-                    if not await _retry_invalid(feedback, force_answer=True):
-                        break
-                    continue
+                    # Do not terminate; treat as a format issue and proceed with the answer.
+                    invalid_outputs += 1
+                    invalid_attempts += 1
+                    terminated_reason = "invalid_answer_summary"
                 normalized = _normalize_answer_letter(answer, len(choices))
                 if normalized is None:
                     allowed = [chr(ord("A") + i) for i in range(len(choices) or 5)]
@@ -568,11 +627,12 @@ class ReviseAgentLoop(AgentLoopBase):
                         "Invalid response: <answer> must be exactly ONE option letter "
                         f"({', '.join(allowed)}). Do not output words or a sentence."
                     )
-                    if not await _retry_invalid(feedback, force_answer=True):
+                    if not await _handle_invalid("invalid_answer_letter", feedback, force_answer=True):
                         break
                     continue
                 if summary is not None:
-                    summary_state = summary
+                    if not _is_placeholder(summary) and _summary_has_ohrpu(summary):
+                        summary_state = summary
                 answer_text = normalized
                 format_valid = True
                 break
@@ -583,19 +643,18 @@ class ReviseAgentLoop(AgentLoopBase):
                     "Invalid response: missing <frames> tag for requesting more frames. "
                     "Remember: <frames> must list NEW frame indices to view NEXT (not already seen)."
                 )
-                if not await _retry_invalid(feedback):
+                if not await _handle_invalid("missing_frames_tag", feedback):
                     break
                 continue
 
             # Validate summary
             if summary is None or _is_placeholder(summary) or not _summary_has_ohrpu(summary):
-                feedback = (
-                    "Invalid response: missing or invalid <summary> tag. "
-                    "Include a meaningful <summary> with P/O/H/U/R in that exact order (no placeholders like '.../none/unknown')."
-                )
-                if not await _retry_invalid(feedback):
-                    break
-                continue
+                # Do not terminate; treat as a format issue and continue frame selection using the last valid summary.
+                invalid_outputs += 1
+                invalid_attempts += 1
+                terminated_reason = "invalid_select_summary"
+            else:
+                summary_state = summary
 
             requested = _parse_frame_indices(frames_text)
             if not requested:
@@ -604,7 +663,7 @@ class ReviseAgentLoop(AgentLoopBase):
                     "Provide 1–{max_k} NEW frame indices to view NEXT (comma-separated). "
                     "Do not request frames already in Seen frames."
                 ).format(max_k=self.max_frames_per_round)
-                if not await _retry_invalid(feedback):
+                if not await _handle_invalid("empty_frames", feedback):
                     break
                 continue
 
@@ -612,19 +671,16 @@ class ReviseAgentLoop(AgentLoopBase):
             requested_unique = [i for i in requested if i not in seen_frames]
             if len(requested_unique) == 0:
                 frames_all_seen += 1
-                candidates = _propose_candidate_unseen_frames(
-                    frame_count=frame_count,
-                    seen=set(seen_frames),
-                    k=max(12, self.max_frames_per_round * 4),
-                    rng=rng,
+                candidate_text = (
+                    " Allowed unseen ranges: "
+                    f"{_format_intervals(_unseen_intervals(frame_count, seen_frames))}."
                 )
-                candidate_text = f" Unseen candidates: {_format_frame_list(candidates)}." if candidates else ""
                 feedback = (
                     "Invalid response: all requested frames are already seen. "
                     "In <frames>, output 1–{max_k} NEW indices NOT in the Seen frames list."
                     + candidate_text
                 ).format(max_k=self.max_frames_per_round)
-                if not await _retry_invalid(feedback):
+                if not await _handle_invalid("frames_all_seen", feedback):
                     break
                 continue
             if len(requested_unique) > self.max_frames_per_round:
@@ -633,7 +689,7 @@ class ReviseAgentLoop(AgentLoopBase):
                     f"which exceeds max {self.max_frames_per_round}. "
                     f"Choose at most {self.max_frames_per_round} NEW frames NOT in Seen frames."
                 )
-                if not await _retry_invalid(feedback):
+                if not await _handle_invalid("too_many_frames", feedback):
                     break
                 continue
 
@@ -645,7 +701,7 @@ class ReviseAgentLoop(AgentLoopBase):
                     f"Valid range is [0, {max(0, frame_count - 1)}]. "
                     "Choose NEW frame indices within range and NOT in Seen frames."
                 )
-                if not await _retry_invalid(feedback):
+                if not await _handle_invalid("frames_out_of_range", feedback):
                     break
                 continue
 
@@ -750,9 +806,10 @@ class ReviseAgentLoop(AgentLoopBase):
             response_mask += [0] * len(selected_user_ids)
             if response_logprobs:
                 response_logprobs += [0.0] * len(selected_user_ids)
+            effective_rounds += 1
 
         # If no answer was produced, force a final answer attempt
-        if answer_text is None:
+        if answer_text is None and terminated_invalid_action == 0:
             feedback = "Max rounds reached. Provide final answer now using <answer> tags."
             await self._retry_with_feedback(
                 feedback,
@@ -798,6 +855,7 @@ class ReviseAgentLoop(AgentLoopBase):
 
         revise_metrics = {
             "num_rounds": num_rounds,
+            "effective_rounds": effective_rounds,
             "frames_used": len(seen_frames),
             "seen_frames": seen_frames,
             "summary": summary_state,
@@ -805,8 +863,11 @@ class ReviseAgentLoop(AgentLoopBase):
             "format_valid": format_valid,
             "last_response": last_response_text,
             "invalid_outputs": invalid_outputs,
+            "invalid_attempts": invalid_attempts,
             "total_retries": total_retries,
             "frames_all_seen": frames_all_seen,
+            "terminated_reason": terminated_reason,
+            "illegal_action": terminated_invalid_action,
         }
 
         # Optional: summary-only correctness approximation
@@ -818,6 +879,7 @@ class ReviseAgentLoop(AgentLoopBase):
         _maybe_log_sample(
             {
                 "timestamp": time.time(),
+                "sample_id": extra_info.get("sample_id"),
                 "video_id": extra_info.get("video_id"),
                 "video_path": video_path,
                 "question": question,

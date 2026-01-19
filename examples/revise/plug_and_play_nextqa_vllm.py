@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import io
 import json
 import os
@@ -70,6 +71,7 @@ DEFAULT_SYSTEM_PROMPT = (
     "- If you are confident, answer instead of requesting more frames.\n"
     "- If requesting, choose 1 to {max_frames_per_round} NEW frames to view NEXT.\n"
     "- Do NOT output any frame index from the Seen frames list; those are already viewed.\n"
+    "- When provided, request frames ONLY within the allowed unseen frame ranges.\n"
     "- In <frames>, output comma-separated integers only (no brackets, no text).\n"
     "- In <summary>, include P/O/H/U/R as short natural-language sentences that reflect your current understanding.\n"
     "- The order inside <summary> MUST be: P then O then H then U then R.\n"
@@ -133,6 +135,40 @@ def _format_frame_list(frames: list[int]) -> str:
     if not frames:
         return "no frames yet"
     return ", ".join(str(int(i)) for i in frames)
+
+
+def _unseen_intervals(frame_count: int, seen_frames: list[int]) -> list[tuple[int, int]]:
+    """Return unseen frame ranges as inclusive [start, end] intervals."""
+    if frame_count <= 0:
+        return []
+    seen = sorted({int(i) for i in (seen_frames or []) if 0 <= int(i) < frame_count})
+    anchors = [-1, *seen, frame_count]
+    intervals: list[tuple[int, int]] = []
+    for a, b in zip(anchors, anchors[1:], strict=False):
+        start = a + 1
+        end = b - 1
+        if start <= end:
+            intervals.append((start, end))
+    return intervals
+
+
+def _format_intervals(intervals: list[tuple[int, int]]) -> str:
+    if not intervals:
+        return "none"
+    parts: list[str] = []
+    for start, end in intervals:
+        if start == end:
+            parts.append(str(start))
+        else:
+            parts.append(f"{start}-{end}")
+    return "; ".join(parts)
+
+
+def _in_intervals(idx: int, intervals: list[tuple[int, int]]) -> bool:
+    for start, end in intervals:
+        if start <= idx <= end:
+            return True
+    return False
 
 
 def _is_placeholder(text: str) -> bool:
@@ -211,23 +247,19 @@ def _build_user_text(
     round_idx: int,
     frame_indices: list[int],
     seen_frames: list[int],
-    candidate_next_frames: Optional[list[int]] = None,
-    max_frames_per_round: int = 0,
 ) -> str:
     lines = [
         f"Round {round_idx} / Question:\n{question_block}",
         f"Total frames L = {frame_count}.",
         f"Seen frames (already viewed; do NOT request these again): {_format_frame_list(seen_frames)}",
+        (
+            "Allowed unseen frame ranges for <frames> (choose NEW indices only from these ranges): "
+            f"{_format_intervals(_unseen_intervals(frame_count, seen_frames))}"
+        ),
         "Current summary:",
         f"<summary>{summary}</summary>",
         "Frames shown in this round:",
     ]
-    if candidate_next_frames:
-        lines.insert(
-            3,
-            "Candidate NEW frames to request NEXT "
-            f"(choose 1–{max_frames_per_round} from this list): {_format_frame_list(candidate_next_frames)}",
-        )
     for idx in frame_indices:
         lines.append(f"Frame {idx} <image>")
     return "\n".join(lines)
@@ -257,6 +289,7 @@ def _extract_frames(video_path: str, frame_indices: list[int]) -> list[Image.Ima
 
 @dataclass
 class NextQASample:
+    sample_id: str
     qid: str
     video_id: str
     video_path: str
@@ -264,6 +297,16 @@ class NextQASample:
     choices: list[str]
     answer_idx: int
     frame_count: int
+
+
+def _stable_sample_id(video_id: str, question: str, choices: list[str], answer_idx: int) -> str:
+    payload = {
+        "video_id": str(video_id),
+        "question": str(question),
+        "choices": [str(c) for c in (choices or [])],
+        "answer_idx": int(answer_idx),
+    }
+    return hashlib.sha1(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
 
 
 def _normalize_video_id(video_id: Any) -> str:
@@ -302,14 +345,16 @@ def _load_nextqa_samples(
         if not os.path.exists(video_path):
             continue
         choices = [str(row[f"a{i}"]) for i in range(5)]
+        answer_idx = int(row.get("answer", 0))
         samples.append(
             NextQASample(
+                sample_id=_stable_sample_id(video_id, str(row.get("question", "")), choices, answer_idx),
                 qid=str(row.get("qid", "")),
                 video_id=video_id,
                 video_path=video_path,
                 question=str(row.get("question", "")),
                 choices=choices,
-                answer_idx=int(row.get("answer", 0)),
+                answer_idx=answer_idx,
                 frame_count=int(row.get("frame_count", 0)),
             )
         )
@@ -679,6 +724,12 @@ def main() -> int:
         default=0,
         help="Retry budget when the model output is missing required tags or requests invalid frames (default: 0 = no retries).",
     )
+    parser.add_argument(
+        "--strict-actions",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Terminate the sample immediately on illegal actions (e.g., invalid <frames>, missing required tags, <think>); format issues like invalid <summary> do not terminate.",
+    )
     parser.add_argument("--log-jsonl", default=os.getenv("REVISE_LOG_PATH", "debug_prompt_logs/revise_samples.jsonl"))
     parser.add_argument("--summary-json", default=None, help="Optional path to save a run summary JSON.")
     parser.add_argument("--progress-interval", type=int, default=10)
@@ -757,6 +808,7 @@ def main() -> int:
                 "top_p": args.top_p,
                 "max_tokens": args.max_tokens,
                 "use_candidate_frames": bool(args.use_candidate_frames),
+                "strict_actions": bool(args.strict_actions),
                 "force_final_answer": args.force_final_answer,
                 "resume_from_log": args.resume_from_log,
                 "initial_completed": resume_completed,
@@ -765,9 +817,11 @@ def main() -> int:
         )
         start_eval = time.time()
         invalid_outputs = 0
+        invalid_action_terminated = 0
         total_model_calls = 0
         total_retries = 0
         fallback_frames_used = 0
+        effective_rounds_total = 0
         for sample in samples[resume_completed:]:
             processed += 1
             try:
@@ -792,6 +846,9 @@ def main() -> int:
                     "R: need evidence from frames"
                 )
                 seen_frames: list[int] = []
+                effective_rounds = 0
+                terminated_reason: Optional[str] = None
+                terminated_invalid_action = False
 
                 init_frames = _sample_uniform_indices(frame_count, args.max_frames_per_round)
                 next_frames = [int(i) for i in init_frames if i >= 0]
@@ -826,8 +883,6 @@ def main() -> int:
                         round_idx=round_idx,
                         frame_indices=frames_this_round,
                         seen_frames=seen_frames,
-                        candidate_next_frames=candidate_next_frames,
-                        max_frames_per_round=args.max_frames_per_round,
                     )
                     if args.force_final_answer and round_idx >= args.max_rounds:
                         user_text = (
@@ -859,6 +914,7 @@ def main() -> int:
                             args.log_jsonl,
                             {
                                 "ts": time.time(),
+                                "sample_id": sample.sample_id,
                                 "qid": sample.qid,
                                 "video_id": sample.video_id,
                                 "video_path": sample.video_path,
@@ -884,6 +940,12 @@ def main() -> int:
                         think = _extract_tag(raw, _THINK_RE)
                         if think is not None:
                             invalid_outputs += 1
+                            terminated_reason = "invalid_think"
+                            if args.strict_actions:
+                                invalid_action_terminated += 1
+                                terminated_invalid_action = True
+                                answer_letter = None
+                                break
                             if retry_idx >= int(args.max_retries_per_round):
                                 # Fall back to the usual next_frames heuristic.
                                 fallback_frames_used += 1
@@ -909,6 +971,12 @@ def main() -> int:
                             answer_letter = _normalize_answer_letter(answer, len(sample.choices))
                             if answer_letter is None:
                                 invalid_outputs += 1
+                                terminated_reason = "invalid_answer_letter"
+                                if args.strict_actions:
+                                    invalid_action_terminated += 1
+                                    terminated_invalid_action = True
+                                    answer_letter = None
+                                    break
                                 if retry_idx >= int(args.max_retries_per_round):
                                     break
                                 total_retries += 1
@@ -921,17 +989,18 @@ def main() -> int:
                                 continue
 
                             if summary is None or _is_placeholder(summary) or (not _summary_has_ohrpu(summary)):
+                                # Format issue: accept the answer, but count as invalid output (no termination).
                                 invalid_outputs += 1
-                                if retry_idx >= int(args.max_retries_per_round):
-                                    break
-                                total_retries += 1
-                                retry_feedback = _retry_feedback_text(
-                                    "Invalid response: when answering, include a meaningful <summary> with P/O/H/U/R in that exact order "
-                                    "(no placeholders like '.../none/unknown').",
-                                    force_answer=True,
-                                )
-                                attempt_user_text = f"{user_text}\n\n{retry_feedback}"
-                                continue
+                                if retry_idx < int(args.max_retries_per_round):
+                                    total_retries += 1
+                                    retry_feedback = _retry_feedback_text(
+                                        "Invalid response: when answering, include a meaningful <summary> with P/O/H/U/R in that exact order "
+                                        "(no placeholders like '.../none/unknown').",
+                                        force_answer=True,
+                                    )
+                                    attempt_user_text = f"{user_text}\n\n{retry_feedback}"
+                                    answer_letter = None
+                                    continue
 
                             break
 
@@ -940,6 +1009,12 @@ def main() -> int:
                         # If we didn't answer, we must request frames, with a valid summary.
                         if frames_text is None:
                             invalid_outputs += 1
+                            terminated_reason = "missing_frames_tag"
+                            if args.strict_actions:
+                                invalid_action_terminated += 1
+                                terminated_invalid_action = True
+                                answer_letter = None
+                                break
                             if retry_idx >= int(args.max_retries_per_round):
                                 next_frames = _sample_uniform_indices(frame_count, 1)
                                 break
@@ -952,45 +1027,30 @@ def main() -> int:
                             attempt_user_text = f"{user_text}\n\n{retry_feedback}"
                             continue
 
+                        # Summary validity is a format issue; do not terminate or retry in strict mode.
                         if summary is None or _is_placeholder(summary) or (not _summary_has_ohrpu(summary)):
                             invalid_outputs += 1
-                            if retry_idx >= int(args.max_retries_per_round):
-                                # Keep the previous summary, still proceed with a fallback next_frames.
-                                fallback_frames_used += 1
-                                requested = candidate_next_frames[: args.max_frames_per_round]
-                                if not requested:
-                                    requested = _sample_unseen_frames(
-                                        frame_count, set(seen_frames), args.max_frames_per_round, rng=rng
-                                    )
-                                next_frames = (
-                                    requested[: args.max_frames_per_round] if requested else _sample_uniform_indices(frame_count, 1)
-                                )
-                                break
-                            total_retries += 1
-                            retry_feedback = _retry_feedback_text(
-                                "Invalid response: missing or invalid <summary>. When requesting frames, output a meaningful <summary> with P/O/H/U/R in that exact order "
-                                "(no placeholders like '.../none/unknown').",
-                                force_answer=bool(args.force_final_answer and round_idx >= args.max_rounds),
-                            )
-                            attempt_user_text = f"{user_text}\n\n{retry_feedback}"
-                            continue
 
                         requested = _parse_frame_indices(frames_text)
-                        requested = [i for i in requested if 0 <= i < frame_count and i not in seen_frames]
+                        allowed_ranges = _unseen_intervals(frame_count, seen_frames)
+                        requested = [
+                            i
+                            for i in requested
+                            if 0 <= i < frame_count and i not in seen_frames and _in_intervals(i, allowed_ranges)
+                        ]
                         if not requested:
                             invalid_outputs += 1
+                            terminated_reason = "invalid_frames"
+                            if args.strict_actions:
+                                invalid_action_terminated += 1
+                                terminated_invalid_action = True
+                                answer_letter = None
+                                break
                             if retry_idx < int(args.max_retries_per_round):
                                 total_retries += 1
-                                candidates = candidate_next_frames[: max(12, args.max_frames_per_round * 4)]
-                                if not candidates:
-                                    candidates = _propose_candidate_frames(
-                                        frame_count=frame_count,
-                                        seen=set(seen_frames),
-                                        k=max(12, args.max_frames_per_round * 4),
-                                        rng=rng,
-                                    )
                                 candidate_text = (
-                                    f" Unseen candidates: {_format_frame_list(candidates)}." if candidates else ""
+                                    " Allowed unseen ranges: "
+                                    f"{_format_intervals(_unseen_intervals(frame_count, seen_frames))}."
                                 )
                                 retry_feedback = _retry_feedback_text(
                                     "Invalid response: requested frames must be NEW and within range. "
@@ -1016,13 +1076,22 @@ def main() -> int:
                             break
 
                         next_frames = requested[: args.max_frames_per_round]
+                        effective_rounds += 1
+                        effective_rounds_total += 1
                         break
 
                     if answer_letter is not None:
                         break
+                    if args.strict_actions and terminated_invalid_action:
+                        break
 
                 total_rounds += round_idx
-                if args.force_final_answer and answer_letter is None and last_user_text is not None:
+                if (
+                    args.force_final_answer
+                    and answer_letter is None
+                    and last_user_text is not None
+                    and not (args.strict_actions and terminated_invalid_action)
+                ):
                     forced_user_text = (
                         f"{last_user_text}\n\n"
                         "Max rounds reached. Provide the final answer now using <answer>LETTER</answer> only."
@@ -1043,6 +1112,7 @@ def main() -> int:
                         args.log_jsonl,
                         {
                             "ts": time.time(),
+                            "sample_id": sample.sample_id,
                             "qid": sample.qid,
                             "video_id": sample.video_id,
                             "video_path": sample.video_path,
@@ -1050,18 +1120,18 @@ def main() -> int:
                             "forced_answer": True,
                             "question": sample.question,
                             "choices": sample.choices,
-                            "ground_truth_idx": sample.answer_idx,
-                            "seen_frames": seen_frames,
-                            "current_frames": last_frames,
-                            "summary_in": summary_state,
-                            "system_prompt": system_prompt,
-                            "user_text": forced_user_text,
-                            "raw_output": raw,
-                        },
-                    )
-                    answer = _extract_tag(raw, _ANSWER_RE)
-                    if answer:
-                        answer_letter = _normalize_answer_letter(answer, len(sample.choices))
+                        "ground_truth_idx": sample.answer_idx,
+                        "seen_frames": seen_frames,
+                        "current_frames": last_frames,
+                        "summary_in": summary_state,
+                        "system_prompt": system_prompt,
+                        "user_text": forced_user_text,
+                        "raw_output": raw,
+                    },
+                )
+                answer = _extract_tag(raw, _ANSWER_RE)
+                if answer:
+                    answer_letter = _normalize_answer_letter(answer, len(sample.choices))
 
                 if answer_letter is not None:
                     pred_idx = ord(answer_letter) - ord("A")
@@ -1100,10 +1170,12 @@ def main() -> int:
                     {
                         "eval/acc": acc,
                         "eval/avg_rounds": avg_rounds,
+                        "eval/avg_effective_rounds": effective_rounds_total / max(1, processed),
                         "eval/failed": failed,
                         "eval/processed": processed,
                         "eval/elapsed_s": elapsed,
                         "eval/invalid_outputs": invalid_outputs,
+                        "eval/invalid_action_terminated": invalid_action_terminated,
                         "eval/total_retries": total_retries,
                         "eval/total_model_calls": total_model_calls,
                         "eval/fallback_frames_used": fallback_frames_used,
@@ -1121,9 +1193,11 @@ def main() -> int:
             "samples": processed,
             "accuracy": acc,
             "avg_rounds": avg_rounds,
+            "avg_effective_rounds": effective_rounds_total / max(1, processed),
             "failed": failed,
             "elapsed_s": elapsed,
             "invalid_outputs": invalid_outputs,
+            "invalid_action_terminated": invalid_action_terminated,
             "total_retries": total_retries,
             "total_model_calls": total_model_calls,
             "fallback_frames_used": fallback_frames_used,
@@ -1134,11 +1208,13 @@ def main() -> int:
             {
                 "eval/final_acc": acc,
                 "eval/final_avg_rounds": avg_rounds,
+                "eval/final_avg_effective_rounds": effective_rounds_total / max(1, processed),
                 "eval/final_failed": failed,
                 "eval/final_elapsed_s": elapsed,
                 "eval/prompt_log_lines": prompt_log_lines,
                 "eval/prompt_log_bytes": prompt_log_bytes,
                 "eval/final_invalid_outputs": invalid_outputs,
+                "eval/final_invalid_action_terminated": invalid_action_terminated,
                 "eval/final_total_retries": total_retries,
                 "eval/final_total_model_calls": total_model_calls,
                 "eval/final_fallback_frames_used": fallback_frames_used,
@@ -1151,8 +1227,10 @@ def main() -> int:
             run.summary["prompt_log_bytes"] = prompt_log_bytes
             run.summary["final_acc"] = acc
             run.summary["final_avg_rounds"] = avg_rounds
+            run.summary["final_avg_effective_rounds"] = effective_rounds_total / max(1, processed)
             run.summary["final_failed"] = failed
             run.summary["invalid_outputs"] = invalid_outputs
+            run.summary["invalid_action_terminated"] = invalid_action_terminated
             run.summary["total_retries"] = total_retries
             run.summary["total_model_calls"] = total_model_calls
             run.summary["fallback_frames_used"] = fallback_frames_used

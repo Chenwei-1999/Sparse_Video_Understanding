@@ -15,6 +15,7 @@ custom_reward_function:
       format: 0.05
       think: 0.02
       summary: 0.05
+      illegal_action_penalty: 2.0
 
 data:
   custom_cls:
@@ -86,10 +87,15 @@ actor_rollout_ref:
       max_retries_per_round: 0
       initial_sampling: uniform
       include_timestamps: True
+      terminate_on_invalid_action: True
 
 algorithm:
   adv_estimator: grpo
   use_kl_in_reward: False
+  kl_ctrl:
+    type: adaptive
+    kl_coef: 0.01
+    target_kl: 0.1
 
 trainer:
   project_name: revise_nextqa

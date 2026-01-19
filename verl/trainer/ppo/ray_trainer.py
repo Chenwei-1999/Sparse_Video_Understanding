@@ -358,10 +358,13 @@ class RayPPOTrainer:
             lora_rank = config.actor_rollout_ref.model.get("lora_rank", 0)
         self.ref_in_actor = lora_rank > 0 or config.actor_rollout_ref.model.get("lora_adapter_path") is not None
 
-        # define in-reward KL control
-        # kl loss control currently not suppoorted
+        # define KL control
         if self.config.algorithm.use_kl_in_reward:
             self.kl_ctrl_in_reward = core_algos.get_kl_controller(self.config.algorithm.kl_ctrl)
+
+        self.kl_ctrl_in_loss: core_algos.AdaptiveKLController | core_algos.FixedKLController | None = None
+        if self.config.actor_rollout_ref.actor.get("use_kl_loss", False):
+            self.kl_ctrl_in_loss = core_algos.get_kl_controller(self.config.algorithm.kl_ctrl)
 
         self.use_prefix_grouper = self.config.actor_rollout_ref.actor.get("use_prefix_grouper", False)
         self.use_legacy_worker_impl = config.trainer.get("use_legacy_worker_impl", "auto")
@@ -959,6 +962,19 @@ class RayPPOTrainer:
 
         if self.ref_in_actor:
             self.ref_policy_wg = self.actor_rollout_wg
+
+        if self.kl_ctrl_in_loss is not None:
+            # Sync initial KL-loss coefficient to the actor workers (adaptive/fixed).
+            # This controls the KL loss term when actor.use_kl_loss=True.
+            try:
+                kl_loss_coef = float(self.kl_ctrl_in_loss.value)
+            except Exception:
+                kl_loss_coef = float(self.config.actor_rollout_ref.actor.get("kl_loss_coef", 0.0))
+            with open_dict(self.config.actor_rollout_ref.actor):
+                self.config.actor_rollout_ref.actor.kl_loss_coef = kl_loss_coef
+            # Best-effort RPC; older workers may not implement this method.
+            if hasattr(self.actor_rollout_wg, "set_kl_loss_coef"):
+                self.actor_rollout_wg.set_kl_loss_coef(kl_loss_coef)
 
         # create async rollout manager and request scheduler
         # Note: mode is always "async" since sync mode is deprecated
@@ -1644,6 +1660,27 @@ class RayPPOTrainer:
                             actor_output = self._update_actor(batch)
                         actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
                         metrics.update(actor_output_metrics)
+                        if self.kl_ctrl_in_loss is not None:
+                            current_kl = actor_output_metrics.get("actor/kl_loss", None)
+                            if current_kl is not None:
+                                try:
+                                    n_steps = int(batch.batch.batch_size[0])
+                                except Exception:
+                                    n_steps = int(self.config.data.train_batch_size * self.config.actor_rollout_ref.rollout.n)
+
+                                prev_coef = float(self.kl_ctrl_in_loss.value)
+                                self.kl_ctrl_in_loss.update(current_kl=float(current_kl), n_steps=n_steps)
+                                new_coef = float(max(0.0, self.kl_ctrl_in_loss.value))
+
+                                with open_dict(self.config.actor_rollout_ref.actor):
+                                    self.config.actor_rollout_ref.actor.kl_loss_coef = new_coef
+                                if hasattr(self.actor_rollout_wg, "set_kl_loss_coef") and new_coef != prev_coef:
+                                    self.actor_rollout_wg.set_kl_loss_coef(new_coef)
+
+                                metrics["actor/kl_loss_coef"] = new_coef
+                                metrics["actor/kl_loss_coef_prev"] = prev_coef
+                                if hasattr(self.kl_ctrl_in_loss, "target"):
+                                    metrics["actor/kl_loss_target"] = float(self.kl_ctrl_in_loss.target)
 
                     # Log rollout generations if enabled
                     rollout_data_dir = self.config.trainer.get("rollout_data_dir", None)

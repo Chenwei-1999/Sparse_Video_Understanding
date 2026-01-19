@@ -25,7 +25,7 @@ import psutil
 import torch
 import torch.distributed
 from codetiming import Timer
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig, OmegaConf, open_dict
 
 try:
     from verl.workers.engine.mindspeed.transformer_impl import repatch
@@ -766,6 +766,22 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
 
         aggressive_empty_cache(force_sync=True)
         return output
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def set_kl_loss_coef(self, kl_loss_coef: float):
+        """Update the actor KL-loss coefficient at runtime.
+
+        This is used by the trainer when `actor.use_kl_loss=True` and adaptive KL control is enabled.
+        """
+        if not self._is_actor:
+            return None
+
+        coef = float(kl_loss_coef)
+        with open_dict(self.config.actor):
+            self.config.actor.kl_loss_coef = coef
+        if hasattr(self, "actor") and hasattr(self.actor, "config"):
+            self.actor.config.kl_loss_coef = coef
+        return coef
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="rollout"))
     @GPUMemoryLogger(role="generate_sequences", logger=logger)

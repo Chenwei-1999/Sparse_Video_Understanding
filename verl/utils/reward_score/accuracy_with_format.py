@@ -175,6 +175,13 @@ def compute_score(
     revise_info = extra_info.get("revise", {}) if isinstance(extra_info, dict) else {}
     final_response = str(revise_info.get("last_response") or solution_str)
 
+    invalid_action = int(
+        revise_info.get("illegal_action")
+        or revise_info.get("invalid_action")
+        or revise_info.get("terminated_invalid_action")
+        or 0
+    )
+
     answer_text = _extract_tag(final_response, _ANSWER_RE)
     pred_letter = _normalize_answer_letter(answer_text or "", num_choices)
     format_valid = float(pred_letter is not None)
@@ -201,6 +208,24 @@ def compute_score(
     w_summary = float(weights.get("summary", 0.05))
     w_invalid_penalty = float(weights.get("invalid_penalty", 0.0))
     w_all_seen_penalty = float(weights.get("frames_all_seen_penalty", 0.0))
+    w_illegal_action_penalty = float(weights.get("illegal_action_penalty", 0.0))
+
+    # Immediate termination with a strong negative reward for illegal actions.
+    if invalid_action > 0 and w_illegal_action_penalty > 0:
+        score = -abs(w_illegal_action_penalty) * float(invalid_action)
+        return {
+            "score": float(score),
+            "answer_correct": float(answer_correct),
+            "format_valid": float(format_valid),
+            "format_strict": float(format_strict),
+            "think_quality": float(think_quality),
+            "summary_present": float(summary_present),
+            "summary_quality": float(summary_quality),
+            "invalid_outputs": float(int(revise_info.get("invalid_outputs") or 0)),
+            "frames_all_seen": float(int(revise_info.get("frames_all_seen") or 0)),
+            "illegal_action": float(invalid_action),
+            "pred_letter": float(ord(pred_letter) - ord("A")) if pred_letter is not None else -1.0,
+        }
 
     bonus = (w_format * format_strict) + (w_think * think_quality) + (w_summary * summary_quality)
 
@@ -221,5 +246,6 @@ def compute_score(
         "summary_quality": float(summary_quality),
         "invalid_outputs": float(invalid_outputs),
         "frames_all_seen": float(frames_all_seen),
+        "illegal_action": float(invalid_action),
         "pred_letter": float(ord(pred_letter) - ord("A")) if pred_letter is not None else -1.0,
     }
