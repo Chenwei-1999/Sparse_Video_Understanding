@@ -519,7 +519,9 @@ def _retry_feedback_text(feedback: str, *, force_answer: bool = False) -> str:
     if force_answer:
         return (
             f"{feedback}\n"
-            "Use <answer>LETTER</answer> where LETTER is a single option letter (e.g., A/B/C/D/E)."
+            "Output ONLY <summary>...</summary> then <answer>LETTER</answer>. "
+            "In <summary>, include P/O/H/U/R in that exact order. "
+            "In <answer>, LETTER must be a single option letter (e.g., A/B/C/D/E)."
         )
     return f"{feedback}\nPlease respond with one of the required formats."
 
@@ -948,7 +950,7 @@ def main() -> int:
                     if args.force_final_answer and round_idx >= args.max_rounds:
                         user_text = (
                             f"{user_text}\n\n"
-                            "This is the final round. You MUST answer now using <answer>LETTER</answer>."
+                            "This is the final round. You MUST answer now using <summary>...</summary> then <answer>LETTER</answer>."
                         )
                     last_user_text = user_text
                     last_images = images
@@ -971,6 +973,23 @@ def main() -> int:
                         )
                         total_model_calls += 1
 
+                        frames_tag = _extract_tag(raw, _FRAMES_RE)
+                        requested_raw_frames: Optional[list[int]] = None
+                        requested_mapped_frames: Optional[list[int]] = None
+                        if frames_tag is not None:
+                            requested_raw_frames = _dedupe_preserve_order(_parse_frame_indices(frames_tag))
+                            if bool(args.use_candidate_frame_ids) and candidate_next_frames:
+                                mapped: list[int] = []
+                                invalid_id = False
+                                for cid in requested_raw_frames:
+                                    if 1 <= cid <= len(candidate_next_frames):
+                                        mapped.append(int(candidate_next_frames[cid - 1]))
+                                    else:
+                                        invalid_id = True
+                                requested_mapped_frames = None if invalid_id else _dedupe_preserve_order(mapped)
+                            else:
+                                requested_mapped_frames = requested_raw_frames
+
                         _maybe_log_jsonl(
                             args.log_jsonl,
                             {
@@ -985,8 +1004,13 @@ def main() -> int:
                                 "question": sample.question,
                                 "choices": sample.choices,
                                 "ground_truth_idx": sample.answer_idx,
+                                "use_candidate_frames": bool(getattr(args, "use_candidate_frames", False)),
+                                "use_candidate_frame_ids": bool(args.use_candidate_frame_ids),
+                                "candidate_unseen_frames": candidate_next_frames if getattr(args, "use_candidate_frames", False) else None,
                                 "seen_frames": seen_frames,
                                 "current_frames": frames_this_round,
+                                "requested_raw_frames": requested_raw_frames,
+                                "requested_mapped_frames": requested_mapped_frames,
                                 "summary_in": summary_state,
                                 "system_prompt": system_prompt,
                                 "user_text": attempt_user_text,
@@ -1196,7 +1220,7 @@ def main() -> int:
                 ):
                     forced_user_text = (
                         f"{last_user_text}\n\n"
-                        "Max rounds reached. Provide the final answer now using <answer>LETTER</answer> only."
+                        "Max rounds reached. Provide the final answer now using <summary>...</summary> then <answer>LETTER</answer>."
                     )
                     raw = _chat_once(
                         base_url=base_url,

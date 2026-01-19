@@ -137,12 +137,20 @@ def main() -> int:
             raw = str(obj.get("raw_output") or "")
             if _extract_tag(raw, _ANSWER_RE):
                 continue
-            frames_text = _extract_tag(raw, _FRAMES_RE)
-            if frames_text is None:
-                continue
             L = _extract_frame_count(str(obj.get("user_text") or ""))
             seen = set(int(i) for i in (obj.get("seen_frames") or []))
-            req = _parse_frame_indices(frames_text)
+
+            # Prefer already-mapped requests when available (handles candidate ID action space).
+            mapped = obj.get("requested_mapped_frames")
+            if isinstance(mapped, list) and mapped:
+                req = [int(i) for i in mapped]
+            else:
+                frames_text = _extract_tag(raw, _FRAMES_RE)
+                if frames_text is None:
+                    continue
+                req = _parse_frame_indices(frames_text)
+            if not req:
+                continue
             valid = [i for i in req if 0 <= i < L and i not in seen]
             if valid:
                 eff += 1
@@ -175,7 +183,11 @@ def main() -> int:
         frames_text = _extract_tag(raw, _FRAMES_RE) or ""
         L = _extract_frame_count(str(last.get("user_text") or ""))
         seen = set(int(i) for i in (last.get("seen_frames") or []))
-        req = _parse_frame_indices(frames_text)
+        mapped = last.get("requested_mapped_frames")
+        if isinstance(mapped, list) and mapped:
+            req = [int(i) for i in mapped]
+        else:
+            req = _parse_frame_indices(frames_text)
         valid = [i for i in req if 0 <= i < L and i not in seen]
         if not valid:
             term_reasons["invalid_frames"] += 1
@@ -210,4 +222,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
