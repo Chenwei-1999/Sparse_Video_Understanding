@@ -130,13 +130,9 @@ def _summary_quality(summary_text: str, num_choices: int) -> float:
     u_q = _text_quality(u_text, min_words=4)
     r_q = _text_quality(r_text, min_words=4)
 
-    # P: must include at least one frame index and avoid Python list formatting like "[4, 8, 12]".
-    p_q = 1.0
-    if _is_placeholder(p_text):
-        p_q = 0.0
-    elif "[" in p_text or "]" in p_text:
-        p_q = 0.0
-    elif not re.findall(r"\d+", p_text):
+    # P: natural-language recap of previously seen frames (avoid Python list formatting like "[4, 8, 12]").
+    p_q = _text_quality(p_text, min_words=4)
+    if "[" in p_text or "]" in p_text:
         p_q = 0.0
 
     return float((o_q + h_q + r_q + p_q + u_q) / 5.0)

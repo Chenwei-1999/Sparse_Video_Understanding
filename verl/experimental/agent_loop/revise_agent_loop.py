@@ -42,18 +42,19 @@ DEFAULT_SYSTEM_PROMPT = (
     "IMPORTANT: Output must follow EXACTLY ONE of the two formats below. Do not output any text outside tags.\n"
     "Output ONLY <summary> plus either <frames> (request) OR <answer> (final).\n"
     "Do NOT output <think>.\n"
-    "Do NOT output placeholders like '...', 'none', 'unknown', or 'N/A' in your final output.\n\n"
+    "Do NOT output bare placeholders like '...', 'none', or 'N/A' as your summary fields.\n"
+    "It's OK to say something is unclear/unknown *within a sentence*, but do not leave fields empty.\n\n"
     "Format 1 — Request more frames (use this only if NOT confident):\n"
-    "<summary>P: the agent has already seen frames 4, 8, and 12; "
-    "O: George seems to pause and think about something, then begins checking the items inside the shelves; "
-    "H: his curiosity appears connected to the objects he finds or examines on the shelves; "
-    "U: it is still unclear what first caused his curiosity or made him start investigating; "
-    "R: looking at later frames may help confirm what exactly caught his attention or what he discovered</summary>\n"
-    "<frames>18, 24</frames>\n\n"
+    "<summary>P: previously seen frames show George approaching a shelf and scanning items; "
+    "O: George pauses, then begins checking items inside the shelves; "
+    "H: his curiosity seems tied to a specific object he notices on the shelf; "
+    "U: it is still unclear what first triggered his curiosity; "
+    "R: request later frames to confirm what he noticed and what he does next</summary>\n"
+    "<frames>1, 3</frames>\n\n"
     "If Candidate Frame IDs are provided in the user prompt, request using those IDs (e.g., <frames>1, 3</frames>).\n\n"
     "Format 2 — Answer now (use this if confident):\n"
-    "<summary>P: the agent has already seen frames 0, 12, 18, and 24; "
-    "O: the key evidence is visible in the shown frames; "
+    "<summary>P: previously seen frames already contain the key evidence; "
+    "O: the answer-relevant evidence is visible in the shown frames; "
     "H: my belief is updated based on the observed evidence; "
     "U: no remaining ambiguity that affects the answer; "
     "R: answered</summary>\n"
@@ -76,11 +77,21 @@ DEFAULT_SYSTEM_PROMPT = (
     "- In <frames>, output comma-separated integers only (no brackets, no text).\n"
     "- In <summary>, include P/O/H/U/R as short natural-language sentences that reflect your current understanding.\n"
     "- The order inside <summary> MUST be: P then O then H then U then R.\n"
-    "- In P, describe previously seen frames in a sentence (e.g., 'the agent has already seen frames 4, 8, and 12'); "
-    "do NOT use Python list formatting like [4, 8, 12].\n"
+    "- In P, describe previously seen frames in a sentence (describe content; do NOT list frame indices or use Python lists like [4, 8, 12]).\n"
     "- In <answer>, output EXACTLY ONE option letter shown in the question (e.g., A/B/C/D/E). No words/punctuation.\n"
     "- Never copy the example text; replace it with information from the current video.\n"
 )
+
+
+def _dedupe_preserve_order(indices: list[int]) -> list[int]:
+    seen: set[int] = set()
+    out: list[int] = []
+    for idx in indices or []:
+        if idx in seen:
+            continue
+        seen.add(idx)
+        out.append(idx)
+    return out
 
 
 def _extract_tag(text: str, tag_re: re.Pattern[str]) -> Optional[str]:
@@ -711,7 +722,7 @@ class ReviseAgentLoop(AgentLoopBase):
 
             summary_state = summary
 
-            requested = _parse_frame_indices(frames_text)
+            requested = _dedupe_preserve_order(_parse_frame_indices(frames_text))
             if self.use_candidate_frame_ids and candidate_unseen:
                 mapped: list[int] = []
                 invalid_id = False
@@ -728,7 +739,7 @@ class ReviseAgentLoop(AgentLoopBase):
                     if not await _handle_invalid("frames_out_of_range", feedback):
                         break
                     continue
-                requested = mapped
+                requested = _dedupe_preserve_order(mapped)
             if not requested:
                 feedback = (
                     "Invalid response: <frames> is empty. "
