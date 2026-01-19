@@ -355,11 +355,17 @@ def _build_user_content(
                 f"{_format_frame_list(candidate_unseen_frames)}"
             )
     lines.extend(["Current summary:", f"<summary>{summary}</summary>", "Frames shown in this round:"])
-    for idx, ts in zip(frame_indices, timestamps, strict=False):
-        if ts is not None:
-            lines.append(f"Frame {idx} (t={ts:.2f}s) <image>")
-        else:
-            lines.append(f"Frame {idx} <image>")
+    if candidate_unseen_frames and use_candidate_frame_ids:
+        # Avoid leaking/copying raw frame indices when the action space is candidate IDs.
+        for i, _ in enumerate(frame_indices):
+            label = chr(ord("A") + i)
+            lines.append(f"Shown frame {label} <image>")
+    else:
+        for idx, ts in zip(frame_indices, timestamps, strict=False):
+            if ts is not None:
+                lines.append(f"Frame {idx} (t={ts:.2f}s) <image>")
+            else:
+                lines.append(f"Frame {idx} <image>")
     return "\n".join(lines)
 
 
