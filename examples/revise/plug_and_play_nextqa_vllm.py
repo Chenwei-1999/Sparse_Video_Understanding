@@ -46,11 +46,11 @@ DEFAULT_SYSTEM_PROMPT = (
     "Do NOT output bare placeholders like '...', 'none', or 'N/A' as your summary fields.\n"
     "It's OK to say something is unclear/unknown *within a sentence*, but do not leave fields empty.\n\n"
     "Format 1 — Request more frames (use this only if NOT confident):\n"
-    "<summary>P: previously seen frames show George approaching a shelf and scanning items; "
-    "O: George pauses, then begins checking items inside the shelves; "
-    "H: his curiosity seems tied to a specific object he notices on the shelf; "
-    "U: it is still unclear what first triggered his curiosity; "
-    "R: request later frames to confirm what he noticed and what he does next</summary>\n"
+    "<summary>P: previously seen frames show a person in the scene interacting with objects; "
+    "O: I observe an action that may be relevant to the question; "
+    "H: based on the evidence so far, my belief is updated but still incomplete; "
+    "U: a key detail needed to answer is still unclear; "
+    "R: request additional frames to gather the missing evidence</summary>\n"
     "<frames>1, 3</frames>\n\n"
     "If Candidate Frame IDs are provided in the user prompt, request using those IDs (e.g., <frames>1, 3</frames>).\n\n"
     "Format 2 — Answer now (use this if confident):\n"
@@ -82,6 +82,18 @@ DEFAULT_SYSTEM_PROMPT = (
     "- In <answer>, output EXACTLY ONE option letter shown in the question (e.g., A/B/C/D/E). No words/punctuation.\n"
     "- Never copy the example text; replace it with information from the current video.\n"
 )
+
+
+def _contains_banned_example(text: str) -> bool:
+    """Detect accidental copying of legacy few-shot example content."""
+    t = _collapse_ws(text).lower()
+    if not t:
+        return False
+    if "george approaching a shelf" in t:
+        return True
+    if "george pauses" in t and "shelf" in t:
+        return True
+    return False
 
 
 def _extract_tag(text: str, pattern: re.Pattern[str]) -> Optional[str]:
@@ -1027,7 +1039,7 @@ def main() -> int:
                         )
 
                         summary = _extract_tag(raw, _SUMMARY_RE)
-                        if summary and (not _is_placeholder(summary)) and _summary_has_ohrpu(summary):
+                        if summary and (not _is_placeholder(summary)) and (not _contains_banned_example(summary)) and _summary_has_ohrpu(summary):
                             summary_state = summary
 
                         think = _extract_tag(raw, _THINK_RE)
@@ -1081,7 +1093,7 @@ def main() -> int:
                                 attempt_user_text = f"{user_text}\n\n{retry_feedback}"
                                 continue
 
-                            if summary is None or _is_placeholder(summary) or (not _summary_has_ohrpu(summary)):
+                            if summary is None or _is_placeholder(summary) or _contains_banned_example(summary) or (not _summary_has_ohrpu(summary)):
                                 invalid_outputs += 1
                                 terminated_reason = "invalid_answer_summary"
                                 if args.strict_actions:
@@ -1125,7 +1137,7 @@ def main() -> int:
                             attempt_user_text = f"{user_text}\n\n{retry_feedback}"
                             continue
 
-                        if summary is None or _is_placeholder(summary) or (not _summary_has_ohrpu(summary)):
+                        if summary is None or _is_placeholder(summary) or _contains_banned_example(summary) or (not _summary_has_ohrpu(summary)):
                             invalid_outputs += 1
                             terminated_reason = "invalid_select_summary"
                             if args.strict_actions:

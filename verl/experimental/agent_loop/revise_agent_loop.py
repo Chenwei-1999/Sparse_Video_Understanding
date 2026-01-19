@@ -45,11 +45,11 @@ DEFAULT_SYSTEM_PROMPT = (
     "Do NOT output bare placeholders like '...', 'none', or 'N/A' as your summary fields.\n"
     "It's OK to say something is unclear/unknown *within a sentence*, but do not leave fields empty.\n\n"
     "Format 1 — Request more frames (use this only if NOT confident):\n"
-    "<summary>P: previously seen frames show George approaching a shelf and scanning items; "
-    "O: George pauses, then begins checking items inside the shelves; "
-    "H: his curiosity seems tied to a specific object he notices on the shelf; "
-    "U: it is still unclear what first triggered his curiosity; "
-    "R: request later frames to confirm what he noticed and what he does next</summary>\n"
+    "<summary>P: previously seen frames show a person in the scene interacting with objects; "
+    "O: I observe an action that may be relevant to the question; "
+    "H: based on the evidence so far, my belief is updated but still incomplete; "
+    "U: a key detail needed to answer is still unclear; "
+    "R: request additional frames to gather the missing evidence</summary>\n"
     "<frames>1, 3</frames>\n\n"
     "If Candidate Frame IDs are provided in the user prompt, request using those IDs (e.g., <frames>1, 3</frames>).\n\n"
     "Format 2 — Answer now (use this if confident):\n"
@@ -81,6 +81,19 @@ DEFAULT_SYSTEM_PROMPT = (
     "- In <answer>, output EXACTLY ONE option letter shown in the question (e.g., A/B/C/D/E). No words/punctuation.\n"
     "- Never copy the example text; replace it with information from the current video.\n"
 )
+
+
+def _contains_banned_example(text: str) -> bool:
+    """Detect accidental copying of legacy few-shot example content."""
+    t = _collapse_ws(text).lower()
+    if not t:
+        return False
+    # Legacy prompt example used a specific name/story that should never be repeated verbatim.
+    if "george approaching a shelf" in t:
+        return True
+    if "george pauses" in t and "shelf" in t:
+        return True
+    return False
 
 
 def _dedupe_preserve_order(indices: list[int]) -> list[int]:
@@ -684,7 +697,7 @@ class ReviseAgentLoop(AgentLoopBase):
                 continue
 
             if answer:
-                if summary is None or _is_placeholder(summary) or not _summary_has_ohrpu(summary):
+                if summary is None or _is_placeholder(summary) or _contains_banned_example(summary) or not _summary_has_ohrpu(summary):
                     feedback = (
                         "Invalid response: when answering, include a meaningful <summary> with P/O/H/U/R "
                         "in that exact order (no placeholders like '.../none/unknown')."
@@ -720,7 +733,7 @@ class ReviseAgentLoop(AgentLoopBase):
                 continue
 
             # Validate summary (required to proceed with frame selection).
-            if summary is None or _is_placeholder(summary) or not _summary_has_ohrpu(summary):
+            if summary is None or _is_placeholder(summary) or _contains_banned_example(summary) or not _summary_has_ohrpu(summary):
                 feedback = (
                     "Invalid response: when requesting more frames, include a meaningful <summary> with P/O/H/U/R "
                     "in that exact order (no placeholders like '.../none/unknown')."
