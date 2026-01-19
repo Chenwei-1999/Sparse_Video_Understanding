@@ -71,6 +71,7 @@ DEFAULT_SYSTEM_PROMPT = (
     "- If requesting, choose 1 to {max_frames_per_round} NEW frames to view NEXT.\n"
     "- Do NOT output any frame index from the Seen frames list; those are already viewed.\n"
     "- When provided, request frames ONLY within the allowed unseen frame ranges.\n"
+    "- When Candidate Frame IDs are provided, output those IDs (1..K) in <frames> instead of raw frame indices.\n"
     "- In <frames>, output comma-separated integers only (no brackets, no text).\n"
     "- In <summary>, include P/O/H/U/R as short natural-language sentences that reflect your current understanding.\n"
     "- The order inside <summary> MUST be: P then O then H then U then R.\n"
@@ -306,24 +307,44 @@ def _build_user_content(
     frame_indices: list[int],
     timestamps: list[Optional[float]],
     seen_frames: list[int],
+    *,
+    hide_seen_frames: bool = False,
+    candidate_unseen_frames: Optional[list[int]] = None,
+    use_candidate_frame_ids: bool = False,
 ) -> str:
     if question_block:
         header = f"Round {round_idx} / Question:\n{question_block}"
     else:
         header = f"Round {round_idx} (same question/options as Round 1)."
 
-    lines = [
-        header,
-        f"Total frames L = {frame_count}.",
-        f"Seen frames (already viewed; do NOT request these again): {_format_frame_list(seen_frames)}",
-        (
+    lines: list[str] = [header, f"Total frames L = {frame_count}."]
+    if hide_seen_frames:
+        lines.append(
+            f"Seen frames: {len(seen_frames)} frames already viewed "
+            "(do NOT request any previously shown frames; follow the selection constraints below)."
+        )
+    else:
+        lines.append(f"Seen frames (already viewed; do NOT request these again): {_format_frame_list(seen_frames)}")
+
+    if candidate_unseen_frames and use_candidate_frame_ids:
+        lines.append(
+            "Candidate unseen frames available as IDs (all NEW): "
+            f"choose IDs in [1, {len(candidate_unseen_frames)}]."
+        )
+        lines.append(
+            "In <frames>, output ONLY candidate IDs (comma-separated). Do NOT output raw frame indices when IDs exist."
+        )
+    else:
+        lines.append(
             "Allowed unseen frame ranges for <frames> (choose NEW indices only from these ranges): "
             f"{_format_intervals(_unseen_intervals(frame_count, seen_frames))}"
-        ),
-        "Current summary:",
-        f"<summary>{summary}</summary>",
-        "Frames shown in this round:",
-    ]
+        )
+        if candidate_unseen_frames:
+            lines.append(
+                "Candidate unseen frames to request (optional, all NEW): "
+                f"{_format_frame_list(candidate_unseen_frames)}"
+            )
+    lines.extend(["Current summary:", f"<summary>{summary}</summary>", "Frames shown in this round:"])
     for idx, ts in zip(frame_indices, timestamps, strict=False):
         if ts is not None:
             lines.append(f"Frame {idx} (t={ts:.2f}s) <image>")
@@ -389,6 +410,10 @@ class ReviseAgentLoop(AgentLoopBase):
         self.initial_sampling = revise_cfg.get("initial_sampling", "uniform")
         self.include_timestamps = bool(revise_cfg.get("include_timestamps", True))
         self.system_prompt_template = revise_cfg.get("system_prompt_template", DEFAULT_SYSTEM_PROMPT)
+        self.hide_seen_frames_in_prompt = bool(revise_cfg.get("hide_seen_frames_in_prompt", False))
+        self.include_candidate_frames_in_prompt = bool(revise_cfg.get("include_candidate_frames_in_prompt", False))
+        self.candidate_frames_in_prompt_k = int(revise_cfg.get("candidate_frames_in_prompt_k", 12))
+        self.use_candidate_frame_ids = bool(revise_cfg.get("use_candidate_frame_ids", False))
         self.seed = int(revise_cfg.get("seed", 0))
 
     async def run(self, sampling_params: dict[str, Any], **kwargs) -> AgentLoopOutput:
@@ -446,6 +471,14 @@ class ReviseAgentLoop(AgentLoopBase):
         question_block = _format_question_block(question, choices)
         system_prompt = self.system_prompt_template.format(max_frames_per_round=self.max_frames_per_round)
 
+        candidate_unseen = None
+        if self.include_candidate_frames_in_prompt:
+            candidate_unseen = _propose_candidate_unseen_frames(
+                frame_count=frame_count,
+                seen=set(seen_frames),
+                k=max(1, self.candidate_frames_in_prompt_k),
+                rng=rng,
+            )
         user_content = _build_user_content(
             question_block,
             summary_state,
@@ -454,6 +487,9 @@ class ReviseAgentLoop(AgentLoopBase):
             frame_indices=init_frames,
             timestamps=timestamps,
             seen_frames=seen_frames,
+            hide_seen_frames=self.hide_seen_frames_in_prompt,
+            candidate_unseen_frames=candidate_unseen,
+            use_candidate_frame_ids=self.use_candidate_frame_ids,
         )
 
         def _with_images(message_list, images):
@@ -497,6 +533,14 @@ class ReviseAgentLoop(AgentLoopBase):
             seen_frames = seen_frames[: len(all_images)]
             timestamps = timestamps[: len(all_images)]
 
+            candidate_unseen = None
+            if self.include_candidate_frames_in_prompt:
+                candidate_unseen = _propose_candidate_unseen_frames(
+                    frame_count=frame_count,
+                    seen=set(seen_frames),
+                    k=max(1, self.candidate_frames_in_prompt_k),
+                    rng=rng,
+                )
             user_content = _build_user_content(
                 question_block,
                 summary_state,
@@ -505,6 +549,9 @@ class ReviseAgentLoop(AgentLoopBase):
                 frame_indices=init_frames,
                 timestamps=timestamps,
                 seen_frames=seen_frames,
+                hide_seen_frames=self.hide_seen_frames_in_prompt,
+                candidate_unseen_frames=candidate_unseen,
+                use_candidate_frame_ids=self.use_candidate_frame_ids,
             )
             messages = _with_images(
                 [
@@ -657,6 +704,23 @@ class ReviseAgentLoop(AgentLoopBase):
                 summary_state = summary
 
             requested = _parse_frame_indices(frames_text)
+            if self.use_candidate_frame_ids and candidate_unseen:
+                mapped: list[int] = []
+                invalid_id = False
+                for cid in requested:
+                    if 1 <= cid <= len(candidate_unseen):
+                        mapped.append(int(candidate_unseen[cid - 1]))
+                    else:
+                        invalid_id = True
+                if invalid_id:
+                    feedback = (
+                        "Invalid response: when Candidate Frame IDs are provided, "
+                        f"output IDs in [1, {len(candidate_unseen)}] inside <frames>."
+                    )
+                    if not await _handle_invalid("frames_out_of_range", feedback):
+                        break
+                    continue
+                requested = mapped
             if not requested:
                 feedback = (
                     "Invalid response: <frames> is empty. "
@@ -745,11 +809,21 @@ class ReviseAgentLoop(AgentLoopBase):
             selected_images: list[Image.Image] = []
             selected_user_ids: Optional[list[int]] = None
             selected_messages: Optional[list[dict[str, Any]]] = None
+            selected_candidate_unseen: Optional[list[int]] = None
 
             for k in range(len(valid_requested), 0, -1):
                 trial_frames = valid_requested[:k]
                 trial_images = candidate_images[:k]
                 trial_timestamps = candidate_timestamps[:k]
+                trial_seen = seen_frames + trial_frames
+                trial_candidate_unseen = None
+                if self.include_candidate_frames_in_prompt:
+                    trial_candidate_unseen = _propose_candidate_unseen_frames(
+                        frame_count=frame_count,
+                        seen=set(trial_seen),
+                        k=max(1, self.candidate_frames_in_prompt_k),
+                        rng=rng,
+                    )
 
                 trial_user_content = _build_user_content(
                     "",
@@ -758,7 +832,10 @@ class ReviseAgentLoop(AgentLoopBase):
                     round_idx=round_idx + 1,
                     frame_indices=trial_frames,
                     timestamps=trial_timestamps,
-                    seen_frames=seen_frames + trial_frames,
+                    seen_frames=trial_seen,
+                    hide_seen_frames=self.hide_seen_frames_in_prompt,
+                    candidate_unseen_frames=trial_candidate_unseen,
+                    use_candidate_frame_ids=self.use_candidate_frame_ids,
                 )
                 trial_messages = _with_images(
                     [{"role": "user", "content": trial_user_content}],
@@ -782,6 +859,7 @@ class ReviseAgentLoop(AgentLoopBase):
                     selected_images = trial_images
                     selected_user_ids = trial_user_ids
                     selected_messages = trial_messages
+                    selected_candidate_unseen = trial_candidate_unseen
                     break
 
             if selected_user_ids is None or selected_messages is None:
@@ -806,6 +884,7 @@ class ReviseAgentLoop(AgentLoopBase):
             response_mask += [0] * len(selected_user_ids)
             if response_logprobs:
                 response_logprobs += [0.0] * len(selected_user_ids)
+            candidate_unseen = selected_candidate_unseen
             effective_rounds += 1
 
         # If no answer was produced, force a final answer attempt

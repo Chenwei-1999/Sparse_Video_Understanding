@@ -222,6 +222,34 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
         metrics["tool_call_counts/max"] = tool_call_counts.max()
         metrics["tool_call_counts/mean"] = tool_call_counts.mean()
 
+    # Reward-function extra info (if provided via reward_extra_keys).
+    # These are per-sequence scalars (length=batch_size) and can be aggregated here for logging/W&B.
+    reward_extra_keys: list[tuple[str, str]] = [
+        ("answer_correct", "reward/answer_correct"),
+        ("format_valid", "reward/format_valid"),
+        ("format_strict", "reward/format_strict"),
+        ("summary_present", "reward/summary_present"),
+        ("summary_quality", "reward/summary_quality"),
+        ("think_quality", "reward/think_quality"),
+        ("invalid_outputs", "reward/invalid_outputs"),
+        ("frames_all_seen", "reward/frames_all_seen"),
+        ("illegal_action", "reward/illegal_action"),
+        ("num_rounds", "reward/num_rounds"),
+        ("effective_rounds", "reward/effective_rounds"),
+    ]
+    for key, prefix in reward_extra_keys:
+        if key not in batch.non_tensor_batch:
+            continue
+        try:
+            values = np.asarray(batch.non_tensor_batch[key], dtype=np.float32)
+        except Exception:
+            continue
+        if values.size == 0:
+            continue
+        metrics[f"{prefix}/mean"] = float(values.mean())
+        metrics[f"{prefix}/max"] = float(values.max())
+        metrics[f"{prefix}/min"] = float(values.min())
+
     return metrics
 
 

@@ -175,6 +175,9 @@ def compute_score(
     revise_info = extra_info.get("revise", {}) if isinstance(extra_info, dict) else {}
     final_response = str(revise_info.get("last_response") or solution_str)
 
+    num_rounds = int(revise_info.get("num_rounds") or 0)
+    effective_rounds = int(revise_info.get("effective_rounds") or 0)
+
     invalid_action = int(
         revise_info.get("illegal_action")
         or revise_info.get("invalid_action")
@@ -209,6 +212,8 @@ def compute_score(
     w_invalid_penalty = float(weights.get("invalid_penalty", 0.0))
     w_all_seen_penalty = float(weights.get("frames_all_seen_penalty", 0.0))
     w_illegal_action_penalty = float(weights.get("illegal_action_penalty", 0.0))
+    w_effective_round_bonus = float(weights.get("effective_round_bonus", 0.0))
+    w_incorrect_answer_penalty = float(weights.get("incorrect_answer_penalty", 0.0))
 
     # Immediate termination with a strong negative reward for illegal actions.
     if invalid_action > 0 and w_illegal_action_penalty > 0:
@@ -224,6 +229,8 @@ def compute_score(
             "invalid_outputs": float(int(revise_info.get("invalid_outputs") or 0)),
             "frames_all_seen": float(int(revise_info.get("frames_all_seen") or 0)),
             "illegal_action": float(invalid_action),
+            "num_rounds": float(num_rounds),
+            "effective_rounds": float(effective_rounds),
             "pred_letter": float(ord(pred_letter) - ord("A")) if pred_letter is not None else -1.0,
         }
 
@@ -233,8 +240,9 @@ def compute_score(
     frames_all_seen = int(revise_info.get("frames_all_seen") or 0)
     penalty = (w_invalid_penalty * float(invalid_outputs)) + (w_all_seen_penalty * float(frames_all_seen))
 
-    score = (w_answer * answer_correct) + (answer_correct * bonus) - (answer_correct * penalty)
-    score = float(max(0.0, score))
+    round_bonus = w_effective_round_bonus * float(effective_rounds)
+    incorrect_penalty = float(abs(w_incorrect_answer_penalty)) if (format_valid > 0 and answer_correct <= 0) else 0.0
+    score = round_bonus + (w_answer * answer_correct) + (answer_correct * bonus) - (answer_correct * penalty) - incorrect_penalty
 
     return {
         "score": float(score),
@@ -247,5 +255,7 @@ def compute_score(
         "invalid_outputs": float(invalid_outputs),
         "frames_all_seen": float(frames_all_seen),
         "illegal_action": float(invalid_action),
+        "num_rounds": float(num_rounds),
+        "effective_rounds": float(effective_rounds),
         "pred_letter": float(ord(pred_letter) - ord("A")) if pred_letter is not None else -1.0,
     }

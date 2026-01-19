@@ -72,6 +72,7 @@ DEFAULT_SYSTEM_PROMPT = (
     "- If requesting, choose 1 to {max_frames_per_round} NEW frames to view NEXT.\n"
     "- Do NOT output any frame index from the Seen frames list; those are already viewed.\n"
     "- When provided, request frames ONLY within the allowed unseen frame ranges.\n"
+    "- When Candidate Frame IDs are provided, output those IDs (1..K) in <frames> instead of raw frame indices.\n"
     "- In <frames>, output comma-separated integers only (no brackets, no text).\n"
     "- In <summary>, include P/O/H/U/R as short natural-language sentences that reflect your current understanding.\n"
     "- The order inside <summary> MUST be: P then O then H then U then R.\n"
@@ -247,19 +248,39 @@ def _build_user_text(
     round_idx: int,
     frame_indices: list[int],
     seen_frames: list[int],
+    *,
+    hide_seen_frames: bool = False,
+    candidate_unseen_frames: Optional[list[int]] = None,
+    use_candidate_frame_ids: bool = False,
 ) -> str:
-    lines = [
-        f"Round {round_idx} / Question:\n{question_block}",
-        f"Total frames L = {frame_count}.",
-        f"Seen frames (already viewed; do NOT request these again): {_format_frame_list(seen_frames)}",
-        (
+    lines: list[str] = [f"Round {round_idx} / Question:\n{question_block}", f"Total frames L = {frame_count}."]
+    if hide_seen_frames:
+        lines.append(
+            f"Seen frames: {len(seen_frames)} frames already viewed "
+            "(do NOT request any previously shown frames; follow the selection constraints below)."
+        )
+    else:
+        lines.append(f"Seen frames (already viewed; do NOT request these again): {_format_frame_list(seen_frames)}")
+
+    if candidate_unseen_frames and use_candidate_frame_ids:
+        lines.append(
+            "Candidate unseen frames available as IDs (all NEW): "
+            f"choose IDs in [1, {len(candidate_unseen_frames)}]."
+        )
+        lines.append(
+            "In <frames>, output ONLY candidate IDs (comma-separated). Do NOT output raw frame indices when IDs exist."
+        )
+    else:
+        lines.append(
             "Allowed unseen frame ranges for <frames> (choose NEW indices only from these ranges): "
             f"{_format_intervals(_unseen_intervals(frame_count, seen_frames))}"
-        ),
-        "Current summary:",
-        f"<summary>{summary}</summary>",
-        "Frames shown in this round:",
-    ]
+        )
+        if candidate_unseen_frames:
+            lines.append(
+                "Candidate unseen frames to request (optional, all NEW): "
+                f"{_format_frame_list(candidate_unseen_frames)}"
+            )
+    lines.extend(["Current summary:", f"<summary>{summary}</summary>", "Frames shown in this round:"])
     for idx in frame_indices:
         lines.append(f"Frame {idx} <image>")
     return "\n".join(lines)
@@ -694,6 +715,19 @@ def main() -> int:
         action="store_true",
         help="Include a small list of candidate unseen frame indices in the prompt to help frame selection.",
     )
+    parser.add_argument(
+        "--use-candidate-frame-ids",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="When --use-candidate-frames is enabled, expose candidates as IDs 1..K (not raw indices) and "
+        "require <frames> to output candidate IDs.",
+    )
+    parser.add_argument(
+        "--hide-seen-frames-in-prompt",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Do not print explicit seen frame indices in the prompt (reduces copying); rely on unseen ranges instead.",
+    )
     parser.add_argument("--temperature", type=float, default=0.2)
     parser.add_argument("--top-p", type=float, default=0.9)
     parser.add_argument("--max-tokens", type=int, default=256)
@@ -754,6 +788,10 @@ def main() -> int:
     parser.add_argument("--wandb-mode", default=os.getenv("WANDB_MODE", ""))
     args = parser.parse_args()
 
+    # Candidate-ID mode requires candidate frames to exist.
+    if bool(getattr(args, "use_candidate_frame_ids", False)):
+        args.use_candidate_frames = True
+
     random.seed(args.seed)
     rng = random.Random(args.seed)
 
@@ -808,6 +846,7 @@ def main() -> int:
                 "top_p": args.top_p,
                 "max_tokens": args.max_tokens,
                 "use_candidate_frames": bool(args.use_candidate_frames),
+                "use_candidate_frame_ids": bool(args.use_candidate_frame_ids),
                 "strict_actions": bool(args.strict_actions),
                 "force_final_answer": args.force_final_answer,
                 "resume_from_log": args.resume_from_log,
@@ -883,6 +922,9 @@ def main() -> int:
                         round_idx=round_idx,
                         frame_indices=frames_this_round,
                         seen_frames=seen_frames,
+                        hide_seen_frames=bool(getattr(args, "hide_seen_frames_in_prompt", False)),
+                        candidate_unseen_frames=candidate_next_frames if getattr(args, "use_candidate_frames", False) else None,
+                        use_candidate_frame_ids=bool(args.use_candidate_frame_ids),
                     )
                     if args.force_final_answer and round_idx >= args.max_rounds:
                         user_text = (
@@ -1032,12 +1074,23 @@ def main() -> int:
                             invalid_outputs += 1
 
                         requested = _parse_frame_indices(frames_text)
-                        allowed_ranges = _unseen_intervals(frame_count, seen_frames)
-                        requested = [
-                            i
-                            for i in requested
-                            if 0 <= i < frame_count and i not in seen_frames and _in_intervals(i, allowed_ranges)
-                        ]
+                        if bool(args.use_candidate_frame_ids) and candidate_next_frames:
+                            mapped: list[int] = []
+                            invalid_id = False
+                            for cid in requested:
+                                if 1 <= cid <= len(candidate_next_frames):
+                                    mapped.append(int(candidate_next_frames[cid - 1]))
+                                else:
+                                    invalid_id = True
+                            requested = mapped if not invalid_id else []
+                            requested = [i for i in requested if 0 <= i < frame_count and i not in seen_frames]
+                        else:
+                            allowed_ranges = _unseen_intervals(frame_count, seen_frames)
+                            requested = [
+                                i
+                                for i in requested
+                                if 0 <= i < frame_count and i not in seen_frames and _in_intervals(i, allowed_ranges)
+                            ]
                         if not requested:
                             invalid_outputs += 1
                             terminated_reason = "invalid_frames"
@@ -1261,6 +1314,7 @@ def main() -> int:
                         "top_p": args.top_p,
                         "max_tokens": args.max_tokens,
                         "use_candidate_frames": bool(args.use_candidate_frames),
+                        "use_candidate_frame_ids": bool(args.use_candidate_frame_ids),
                         "results": results,
                         "prompt_log_jsonl": args.log_jsonl,
                         "prompt_log_lines": prompt_log_lines,
