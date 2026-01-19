@@ -50,6 +50,7 @@ DEFAULT_SYSTEM_PROMPT = (
     "U: it is still unclear what first caused his curiosity or made him start investigating; "
     "R: looking at later frames may help confirm what exactly caught his attention or what he discovered</summary>\n"
     "<frames>18, 24</frames>\n\n"
+    "If Candidate Frame IDs are provided in the user prompt, request using those IDs (e.g., <frames>1, 3</frames>).\n\n"
     "Format 2 — Answer now (use this if confident):\n"
     "<summary>P: the agent has already seen frames 0, 12, 18, and 24; "
     "O: the key evidence is visible in the shown frames; "
