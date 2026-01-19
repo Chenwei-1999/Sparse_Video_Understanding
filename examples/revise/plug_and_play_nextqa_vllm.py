@@ -1325,11 +1325,16 @@ def main() -> int:
         prompt_log_bytes = os.path.getsize(args.log_jsonl) if args.log_jsonl and os.path.exists(args.log_jsonl) else 0
         results = {
             "samples": processed,
+            "correct": correct,
             "accuracy": acc,
+            "total_rounds": total_rounds,
             "avg_rounds": avg_rounds,
+            "total_effective_rounds": effective_rounds_total,
             "avg_effective_rounds": effective_rounds_total / max(1, processed),
             "failed": failed,
             "elapsed_s": elapsed,
+            "prompt_log_lines": prompt_log_lines,
+            "prompt_log_bytes": prompt_log_bytes,
             "invalid_outputs": invalid_outputs,
             "invalid_action_terminated": invalid_action_terminated,
             "total_retries": total_retries,
