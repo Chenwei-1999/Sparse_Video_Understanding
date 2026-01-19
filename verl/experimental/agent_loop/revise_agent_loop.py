@@ -305,7 +305,10 @@ def _format_question_block(question: str, choices: list[str]) -> str:
     for label, choice in zip(labels, choices, strict=False):
         lines.append(f"{label}. {choice}")
     if labels:
-        lines.append(f"Answer with exactly one letter only: {', '.join(labels)}.")
+        lines.append(
+            "To answer, output <summary>...</summary> then <answer>LETTER</answer> "
+            f"(LETTER must be one of: {', '.join(labels)})."
+        )
     return "\n".join(lines)
 
 
