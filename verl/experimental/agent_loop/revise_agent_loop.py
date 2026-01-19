@@ -123,6 +123,22 @@ def _format_frame_list(frames: list[int]) -> str:
         return "no frames yet"
     return ", ".join(str(int(i)) for i in frames)
 
+def _indices_to_intervals(indices: list[int]) -> list[tuple[int, int]]:
+    """Convert a list of indices to inclusive [start, end] intervals."""
+    if not indices:
+        return []
+    sorted_unique = sorted({int(i) for i in indices})
+    intervals: list[tuple[int, int]] = []
+    start = prev = sorted_unique[0]
+    for idx in sorted_unique[1:]:
+        if idx == prev + 1:
+            prev = idx
+            continue
+        intervals.append((start, prev))
+        start = prev = idx
+    intervals.append((start, prev))
+    return intervals
+
 
 def _unseen_intervals(frame_count: int, seen_frames: list[int]) -> list[tuple[int, int]]:
     """Return unseen frame ranges as inclusive [start, end] intervals."""
@@ -337,6 +353,7 @@ def _build_user_content(
     hide_seen_frames: bool = False,
     candidate_unseen_frames: Optional[list[int]] = None,
     use_candidate_frame_ids: bool = False,
+    require_candidate_frames: bool = False,
 ) -> str:
     if question_block:
         header = f"Round {round_idx} / Question:\n{question_block}"
@@ -366,12 +383,16 @@ def _build_user_content(
             f"{_format_intervals(_unseen_intervals(frame_count, seen_frames))}"
         )
         if candidate_unseen_frames:
-            lines.append(
-                "Candidate unseen frames to request (optional, all NEW): "
-                f"{_format_frame_list(candidate_unseen_frames)}"
+            prefix = (
+                "Candidate unseen frame ranges to request (REQUIRED, all NEW): "
+                if require_candidate_frames
+                else "Candidate unseen frame ranges to request (optional, all NEW): "
             )
+            lines.append(prefix + f"{_format_intervals(_indices_to_intervals(candidate_unseen_frames))}")
+            if require_candidate_frames:
+                lines.append("In <frames>, output ONLY indices within the Candidate unseen frame ranges above.")
     lines.extend(["Current summary:", f"<summary>{summary}</summary>", "Frames shown in this round:"])
-    if candidate_unseen_frames and use_candidate_frame_ids:
+    if hide_seen_frames or (candidate_unseen_frames and use_candidate_frame_ids):
         # Avoid leaking/copying raw frame indices when the action space is candidate IDs.
         for i, _ in enumerate(frame_indices):
             label = chr(ord("A") + i)
@@ -446,6 +467,7 @@ class ReviseAgentLoop(AgentLoopBase):
         self.include_candidate_frames_in_prompt = bool(revise_cfg.get("include_candidate_frames_in_prompt", False))
         self.candidate_frames_in_prompt_k = int(revise_cfg.get("candidate_frames_in_prompt_k", 12))
         self.use_candidate_frame_ids = bool(revise_cfg.get("use_candidate_frame_ids", False))
+        self.require_candidate_frames = bool(revise_cfg.get("require_candidate_frames", False))
         self.seed = int(revise_cfg.get("seed", 0))
 
     async def run(self, sampling_params: dict[str, Any], **kwargs) -> AgentLoopOutput:
@@ -522,6 +544,7 @@ class ReviseAgentLoop(AgentLoopBase):
             hide_seen_frames=self.hide_seen_frames_in_prompt,
             candidate_unseen_frames=candidate_unseen,
             use_candidate_frame_ids=self.use_candidate_frame_ids,
+            require_candidate_frames=self.require_candidate_frames,
         )
 
         def _with_images(message_list, images):
@@ -584,6 +607,7 @@ class ReviseAgentLoop(AgentLoopBase):
                 hide_seen_frames=self.hide_seen_frames_in_prompt,
                 candidate_unseen_frames=candidate_unseen,
                 use_candidate_frame_ids=self.use_candidate_frame_ids,
+                require_candidate_frames=self.require_candidate_frames,
             )
             messages = _with_images(
                 [
@@ -617,6 +641,7 @@ class ReviseAgentLoop(AgentLoopBase):
             "frames_all_seen",
             "too_many_frames",
             "frames_out_of_range",
+            "frames_not_in_candidates",
             # Summary is required for both actions.
             "invalid_select_summary",
             "invalid_answer_summary",
@@ -762,6 +787,19 @@ class ReviseAgentLoop(AgentLoopBase):
                         break
                     continue
                 requested = _dedupe_preserve_order(mapped)
+            elif self.require_candidate_frames and candidate_unseen:
+                allowed = {int(i) for i in candidate_unseen}
+                disallowed = [i for i in requested if int(i) not in allowed]
+                if disallowed:
+                    feedback = (
+                        "Invalid response: when Candidate unseen frame ranges are provided, "
+                        "request ONLY indices within those candidate ranges. "
+                        "Candidate ranges: "
+                        f"{_format_intervals(_indices_to_intervals(candidate_unseen))}."
+                    )
+                    if not await _handle_invalid("frames_not_in_candidates", feedback):
+                        break
+                    continue
             if not requested:
                 feedback = (
                     "Invalid response: <frames> is empty. "
@@ -877,6 +915,7 @@ class ReviseAgentLoop(AgentLoopBase):
                     hide_seen_frames=self.hide_seen_frames_in_prompt,
                     candidate_unseen_frames=trial_candidate_unseen,
                     use_candidate_frame_ids=self.use_candidate_frame_ids,
+                    require_candidate_frames=self.require_candidate_frames,
                 )
                 trial_messages = _with_images(
                     [{"role": "user", "content": trial_user_content}],

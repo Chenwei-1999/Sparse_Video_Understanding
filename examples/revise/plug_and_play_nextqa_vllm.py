@@ -118,6 +118,23 @@ def _dedupe_preserve_order(indices: list[int]) -> list[int]:
     return out
 
 
+def _indices_to_intervals(indices: list[int]) -> list[tuple[int, int]]:
+    """Convert a list of indices to inclusive [start, end] intervals."""
+    if not indices:
+        return []
+    sorted_unique = sorted({int(i) for i in indices})
+    intervals: list[tuple[int, int]] = []
+    start = prev = sorted_unique[0]
+    for idx in sorted_unique[1:]:
+        if idx == prev + 1:
+            prev = idx
+            continue
+        intervals.append((start, prev))
+        start = prev = idx
+    intervals.append((start, prev))
+    return intervals
+
+
 def _normalize_answer_letter(answer_text: str, num_choices: int) -> Optional[str]:
     allowed = {chr(ord("A") + i) for i in range(max(0, num_choices))}
     if not allowed:
@@ -277,6 +294,7 @@ def _build_user_text(
     hide_seen_frames: bool = False,
     candidate_unseen_frames: Optional[list[int]] = None,
     use_candidate_frame_ids: bool = False,
+    require_candidate_frames: bool = False,
 ) -> str:
     lines: list[str] = [f"Round {round_idx} / Question:\n{question_block}", f"Total frames L = {frame_count}."]
     if hide_seen_frames:
@@ -301,12 +319,18 @@ def _build_user_text(
             f"{_format_intervals(_unseen_intervals(frame_count, seen_frames))}"
         )
         if candidate_unseen_frames:
-            lines.append(
-                "Candidate unseen frames to request (optional, all NEW): "
-                f"{_format_frame_list(candidate_unseen_frames)}"
+            prefix = (
+                "Candidate unseen frame ranges to request (REQUIRED, all NEW): "
+                if require_candidate_frames
+                else "Candidate unseen frame ranges to request (optional, all NEW): "
             )
+            lines.append(
+                prefix + f"{_format_intervals(_indices_to_intervals(candidate_unseen_frames))}"
+            )
+            if require_candidate_frames:
+                lines.append("In <frames>, output ONLY indices within the Candidate unseen frame ranges above.")
     lines.extend(["Current summary:", f"<summary>{summary}</summary>", "Frames shown in this round:"])
-    if candidate_unseen_frames and use_candidate_frame_ids:
+    if hide_seen_frames or (candidate_unseen_frames and use_candidate_frame_ids):
         # Avoid leaking/copying raw frame indices when the action space is candidate IDs.
         for i, _ in enumerate(frame_indices):
             label = chr(ord("A") + i)
@@ -734,6 +758,8 @@ def main() -> int:
     parser.add_argument("--map-json", required=True)
     parser.add_argument("--csv", required=True, help="NExT-QA CSV (e.g., val.csv)")
     parser.add_argument("--max-samples", type=int, default=4)
+    parser.add_argument("--num-shards", type=int, default=1, help="Shard the dataset for data-parallel evaluation.")
+    parser.add_argument("--shard-idx", type=int, default=0, help="Shard index in [0, num_shards).")
     parser.add_argument("--max-rounds", type=int, default=5)
     parser.add_argument(
         "--max-frames-per-round",
@@ -761,6 +787,13 @@ def main() -> int:
         default=False,
         help="When --use-candidate-frames is enabled, expose candidates as IDs 1..K (not raw indices) and "
         "require <frames> to output candidate IDs.",
+    )
+    parser.add_argument(
+        "--require-candidate-frames",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="When candidate frames are provided, treat them as an allowlist: <frames> must only contain indices "
+        "within the candidate unseen ranges (otherwise terminate on strict actions).",
     )
     parser.add_argument(
         "--hide-seen-frames-in-prompt",
@@ -831,6 +864,8 @@ def main() -> int:
     # Candidate-ID mode requires candidate frames to exist.
     if bool(getattr(args, "use_candidate_frame_ids", False)):
         args.use_candidate_frames = True
+    if bool(getattr(args, "require_candidate_frames", False)):
+        args.use_candidate_frames = True
 
     random.seed(args.seed)
     rng = random.Random(args.seed)
@@ -853,6 +888,31 @@ def main() -> int:
         )
         if not samples:
             raise RuntimeError("No samples loaded (check csv/map/video_root).")
+
+        num_shards = max(1, int(getattr(args, "num_shards", 1)))
+        shard_idx = int(getattr(args, "shard_idx", 0))
+        if num_shards > 1:
+            if not (0 <= shard_idx < num_shards):
+                raise ValueError(f"--shard-idx must be in [0, {num_shards}) (got {shard_idx}).")
+
+            def _suffix_path(path: str, *, suffix: str) -> str:
+                root, ext = os.path.splitext(path)
+                if ext:
+                    return f"{root}{suffix}{ext}"
+                return f"{path}{suffix}"
+
+            # Avoid multiple shards writing to the same output files by default.
+            shard_suffix = f".shard{shard_idx}of{num_shards}"
+            if args.log_jsonl and shard_suffix not in args.log_jsonl:
+                args.log_jsonl = _suffix_path(args.log_jsonl, suffix=shard_suffix)
+            if args.summary_json and shard_suffix not in args.summary_json:
+                args.summary_json = _suffix_path(args.summary_json, suffix=shard_suffix)
+
+            samples = [s for i, s in enumerate(samples) if (i % num_shards) == shard_idx]
+            if not samples:
+                raise RuntimeError(
+                    f"No samples selected for shard {shard_idx}/{num_shards} (check --max-samples / sharding)."
+                )
 
         resume_completed = 0
         correct = 0
@@ -879,6 +939,8 @@ def main() -> int:
                 "max_model_len": args.max_model_len,
                 "gpu_memory_utilization": args.gpu_memory_utilization,
                 "max_samples": args.max_samples,
+                "num_shards": int(getattr(args, "num_shards", 1)),
+                "shard_idx": int(getattr(args, "shard_idx", 0)),
                 "max_rounds": args.max_rounds,
                 "max_frames_per_round": args.max_frames_per_round,
                 "max_retries_per_round": args.max_retries_per_round,
@@ -887,6 +949,7 @@ def main() -> int:
                 "max_tokens": args.max_tokens,
                 "use_candidate_frames": bool(args.use_candidate_frames),
                 "use_candidate_frame_ids": bool(args.use_candidate_frame_ids),
+                "require_candidate_frames": bool(getattr(args, "require_candidate_frames", False)),
                 "strict_actions": bool(args.strict_actions),
                 "force_final_answer": args.force_final_answer,
                 "resume_from_log": args.resume_from_log,
@@ -966,6 +1029,7 @@ def main() -> int:
                         hide_seen_frames=bool(getattr(args, "hide_seen_frames_in_prompt", False)),
                         candidate_unseen_frames=candidate_next_frames if getattr(args, "use_candidate_frames", False) else None,
                         use_candidate_frame_ids=bool(args.use_candidate_frame_ids),
+                        require_candidate_frames=bool(getattr(args, "require_candidate_frames", False)),
                     )
                     if args.force_final_answer and round_idx >= args.max_rounds:
                         user_text = (
@@ -1168,12 +1232,27 @@ def main() -> int:
                                 requested = _dedupe_preserve_order(mapped)
                                 requested = [i for i in requested if 0 <= i < frame_count and i not in seen_frames]
                         else:
-                            allowed_ranges = _unseen_intervals(frame_count, seen_frames)
-                            requested = [
-                                i
-                                for i in requested
-                                if 0 <= i < frame_count and i not in seen_frames and _in_intervals(i, allowed_ranges)
-                            ]
+                            if bool(getattr(args, "require_candidate_frames", False)) and candidate_next_frames:
+                                allowed = {int(i) for i in candidate_next_frames}
+                                disallowed = [i for i in requested if int(i) not in allowed]
+                                if disallowed:
+                                    invalid_outputs += 1
+                                    terminated_reason = "frames_not_in_candidates"
+                                    if args.strict_actions:
+                                        invalid_action_terminated += 1
+                                        terminated_invalid_action = True
+                                        answer_letter = None
+                                        break
+                                    requested = []
+                                else:
+                                    requested = [i for i in requested if 0 <= i < frame_count and i not in seen_frames and int(i) in allowed]
+                            else:
+                                allowed_ranges = _unseen_intervals(frame_count, seen_frames)
+                                requested = [
+                                    i
+                                    for i in requested
+                                    if 0 <= i < frame_count and i not in seen_frames and _in_intervals(i, allowed_ranges)
+                                ]
 
                         if requested and len(requested) > int(args.max_frames_per_round):
                             invalid_outputs += 1
@@ -1405,6 +1484,8 @@ def main() -> int:
                         "max_model_len": args.max_model_len,
                         "gpu_memory_utilization": args.gpu_memory_utilization,
                         "max_samples": args.max_samples,
+                        "num_shards": int(getattr(args, "num_shards", 1)),
+                        "shard_idx": int(getattr(args, "shard_idx", 0)),
                         "max_rounds": args.max_rounds,
                         "max_frames_per_round": args.max_frames_per_round,
                         "max_retries_per_round": args.max_retries_per_round,
@@ -1413,6 +1494,7 @@ def main() -> int:
                         "max_tokens": args.max_tokens,
                         "use_candidate_frames": bool(args.use_candidate_frames),
                         "use_candidate_frame_ids": bool(args.use_candidate_frame_ids),
+                        "require_candidate_frames": bool(getattr(args, "require_candidate_frames", False)),
                         "results": results,
                         "prompt_log_jsonl": args.log_jsonl,
                         "prompt_log_lines": prompt_log_lines,
