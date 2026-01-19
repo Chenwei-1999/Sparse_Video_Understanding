@@ -586,6 +586,9 @@ class ReviseAgentLoop(AgentLoopBase):
             "frames_all_seen",
             "too_many_frames",
             "frames_out_of_range",
+            # Summary is required for both actions.
+            "invalid_select_summary",
+            "invalid_answer_summary",
             # Hard protocol violations.
             "invalid_think",
             "invalid_answer_letter",
@@ -664,10 +667,13 @@ class ReviseAgentLoop(AgentLoopBase):
 
             if answer:
                 if summary is None or _is_placeholder(summary) or not _summary_has_ohrpu(summary):
-                    # Do not terminate; treat as a format issue and proceed with the answer.
-                    invalid_outputs += 1
-                    invalid_attempts += 1
-                    terminated_reason = "invalid_answer_summary"
+                    feedback = (
+                        "Invalid response: when answering, include a meaningful <summary> with P/O/H/U/R "
+                        "in that exact order (no placeholders like '.../none/unknown')."
+                    )
+                    if not await _handle_invalid("invalid_answer_summary", feedback, force_answer=True):
+                        break
+                    continue
                 normalized = _normalize_answer_letter(answer, len(choices))
                 if normalized is None:
                     allowed = [chr(ord("A") + i) for i in range(len(choices) or 5)]
@@ -695,14 +701,17 @@ class ReviseAgentLoop(AgentLoopBase):
                     break
                 continue
 
-            # Validate summary
+            # Validate summary (required to proceed with frame selection).
             if summary is None or _is_placeholder(summary) or not _summary_has_ohrpu(summary):
-                # Do not terminate; treat as a format issue and continue frame selection using the last valid summary.
-                invalid_outputs += 1
-                invalid_attempts += 1
-                terminated_reason = "invalid_select_summary"
-            else:
-                summary_state = summary
+                feedback = (
+                    "Invalid response: when requesting more frames, include a meaningful <summary> with P/O/H/U/R "
+                    "in that exact order (no placeholders like '.../none/unknown')."
+                )
+                if not await _handle_invalid("invalid_select_summary", feedback):
+                    break
+                continue
+
+            summary_state = summary
 
             requested = _parse_frame_indices(frames_text)
             if self.use_candidate_frame_ids and candidate_unseen:

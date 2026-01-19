@@ -1032,8 +1032,13 @@ def main() -> int:
                                 continue
 
                             if summary is None or _is_placeholder(summary) or (not _summary_has_ohrpu(summary)):
-                                # Format issue: accept the answer, but count as invalid output (no termination).
                                 invalid_outputs += 1
+                                terminated_reason = "invalid_answer_summary"
+                                if args.strict_actions:
+                                    invalid_action_terminated += 1
+                                    terminated_invalid_action = True
+                                    answer_letter = None
+                                    break
                                 if retry_idx < int(args.max_retries_per_round):
                                     total_retries += 1
                                     retry_feedback = _retry_feedback_text(
@@ -1070,9 +1075,14 @@ def main() -> int:
                             attempt_user_text = f"{user_text}\n\n{retry_feedback}"
                             continue
 
-                        # Summary validity is a format issue; do not terminate or retry in strict mode.
                         if summary is None or _is_placeholder(summary) or (not _summary_has_ohrpu(summary)):
                             invalid_outputs += 1
+                            terminated_reason = "invalid_select_summary"
+                            if args.strict_actions:
+                                invalid_action_terminated += 1
+                                terminated_invalid_action = True
+                                answer_letter = None
+                                break
 
                         requested = _parse_frame_indices(frames_text)
                         if bool(args.use_candidate_frame_ids) and candidate_next_frames:
