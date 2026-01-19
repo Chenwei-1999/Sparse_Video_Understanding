@@ -737,6 +737,13 @@ def main() -> int:
         help="Include a small list of candidate unseen frame indices in the prompt to help frame selection.",
     )
     parser.add_argument(
+        "--candidate-k",
+        type=int,
+        default=None,
+        help="Number of candidate unseen frames to propose when --use-candidate-frames is set "
+        "(default: max(12, max_frames_per_round*4)).",
+    )
+    parser.add_argument(
         "--use-candidate-frame-ids",
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -929,10 +936,11 @@ def main() -> int:
 
                     candidate_next_frames: list[int] = []
                     if getattr(args, "use_candidate_frames", False):
+                        k = args.candidate_k if args.candidate_k is not None else max(12, args.max_frames_per_round * 4)
                         candidate_next_frames = _propose_candidate_frames(
                             frame_count=frame_count,
                             seen=set(seen_frames),
-                            k=max(12, args.max_frames_per_round * 4),
+                            k=k,
                             rng=rng,
                         )
                     images = _extract_frames(sample.video_path, frames_this_round)
