@@ -107,6 +107,13 @@ def _parse_frame_indices(text: str) -> list[int]:
     return [int(n) for n in re.findall(r"\d+", text or "")]
 
 
+def _frames_has_range_syntax(frames_text: str) -> bool:
+    if not frames_text:
+        return False
+    # Common failure mode: model copies allowed ranges like "4-182" into <frames>.
+    return bool(re.search(r"\d+\s*[-–—]\s*\d+", frames_text))
+
+
 def _dedupe_preserve_order(indices: list[int]) -> list[int]:
     seen: set[int] = set()
     out: list[int] = []
@@ -1110,30 +1117,30 @@ def main() -> int:
                         if think is not None:
                             invalid_outputs += 1
                             terminated_reason = "invalid_think"
+                            if retry_idx < int(args.max_retries_per_round):
+                                total_retries += 1
+                                retry_feedback = _retry_feedback_text(
+                                    "Invalid response: do NOT output <think>. Output ONLY <summary> plus either <frames> (request) or <answer> (final).",
+                                    force_answer=bool(args.force_final_answer and round_idx >= args.max_rounds),
+                                )
+                                attempt_user_text = f"{user_text}\n\n{retry_feedback}"
+                                continue
                             if args.strict_actions:
                                 invalid_action_terminated += 1
                                 terminated_invalid_action = True
                                 answer_letter = None
                                 break
-                            if retry_idx >= int(args.max_retries_per_round):
-                                # Fall back to the usual next_frames heuristic.
-                                fallback_frames_used += 1
-                                requested = _sample_unseen_frames(
-                                    frame_count, set(seen_frames), args.max_frames_per_round, rng=rng
-                                )
-                                next_frames = (
-                                    requested[: args.max_frames_per_round]
-                                    if requested
-                                    else _sample_uniform_indices(frame_count, 1)
-                                )
-                                break
-                            total_retries += 1
-                            retry_feedback = _retry_feedback_text(
-                                "Invalid response: do NOT output <think>. Output ONLY <summary> plus either <frames> (request) or <answer> (final).",
-                                force_answer=bool(args.force_final_answer and round_idx >= args.max_rounds),
+                            # Fall back to the usual next_frames heuristic.
+                            fallback_frames_used += 1
+                            requested = _sample_unseen_frames(
+                                frame_count, set(seen_frames), args.max_frames_per_round, rng=rng
                             )
-                            attempt_user_text = f"{user_text}\n\n{retry_feedback}"
-                            continue
+                            next_frames = (
+                                requested[: args.max_frames_per_round]
+                                if requested
+                                else _sample_uniform_indices(frame_count, 1)
+                            )
+                            break
 
                         answer = _extract_tag(raw, _ANSWER_RE)
                         if answer:
@@ -1141,30 +1148,33 @@ def main() -> int:
                             if answer_letter is None:
                                 invalid_outputs += 1
                                 terminated_reason = "invalid_answer_letter"
+                                if retry_idx < int(args.max_retries_per_round):
+                                    total_retries += 1
+                                    retry_feedback = _retry_feedback_text(
+                                        "Invalid response: <answer> must be exactly ONE option letter (A/B/C/D/E). "
+                                        "Do not output words or a sentence.",
+                                        force_answer=True,
+                                    )
+                                    attempt_user_text = f"{user_text}\n\n{retry_feedback}"
+                                    continue
                                 if args.strict_actions:
                                     invalid_action_terminated += 1
                                     terminated_invalid_action = True
                                     answer_letter = None
                                     break
-                                if retry_idx >= int(args.max_retries_per_round):
-                                    break
-                                total_retries += 1
-                                retry_feedback = _retry_feedback_text(
-                                    "Invalid response: <answer> must be exactly ONE option letter (A/B/C/D/E). "
-                                    "Do not output words or a sentence.",
-                                    force_answer=True,
+                                # Non-strict: ignore the invalid answer and continue with a fallback frame.
+                                fallback_frames_used += 1
+                                next_frames = _sample_unseen_frames(
+                                    frame_count, set(seen_frames), args.max_frames_per_round, rng=rng
                                 )
-                                attempt_user_text = f"{user_text}\n\n{retry_feedback}"
-                                continue
+                                if not next_frames:
+                                    next_frames = _sample_uniform_indices(frame_count, 1)
+                                answer_letter = None
+                                break
 
                             if summary is None or _is_placeholder(summary) or _contains_banned_example(summary) or (not _summary_has_ohrpu(summary)):
                                 invalid_outputs += 1
                                 terminated_reason = "invalid_answer_summary"
-                                if args.strict_actions:
-                                    invalid_action_terminated += 1
-                                    terminated_invalid_action = True
-                                    answer_letter = None
-                                    break
                                 if retry_idx < int(args.max_retries_per_round):
                                     total_retries += 1
                                     retry_feedback = _retry_feedback_text(
@@ -1184,31 +1194,50 @@ def main() -> int:
                         if frames_text is None:
                             invalid_outputs += 1
                             terminated_reason = "missing_frames_tag"
+                            if retry_idx < int(args.max_retries_per_round):
+                                total_retries += 1
+                                retry_feedback = _retry_feedback_text(
+                                    "Invalid response: missing <frames> tag for requesting more frames. "
+                                    "Remember: <frames> must list NEW frame indices to view NEXT (not already seen).",
+                                    force_answer=bool(args.force_final_answer and round_idx >= args.max_rounds),
+                                )
+                                attempt_user_text = f"{user_text}\n\n{retry_feedback}"
+                                continue
                             if args.strict_actions:
                                 invalid_action_terminated += 1
                                 terminated_invalid_action = True
                                 answer_letter = None
                                 break
-                            if retry_idx >= int(args.max_retries_per_round):
-                                next_frames = _sample_uniform_indices(frame_count, 1)
-                                break
-                            total_retries += 1
-                            retry_feedback = _retry_feedback_text(
-                                "Invalid response: missing <frames> tag for requesting more frames. "
-                                "Remember: <frames> must list NEW frame indices to view NEXT (not already seen).",
-                                force_answer=bool(args.force_final_answer and round_idx >= args.max_rounds),
-                            )
-                            attempt_user_text = f"{user_text}\n\n{retry_feedback}"
-                            continue
+                            next_frames = _sample_uniform_indices(frame_count, 1)
+                            break
 
                         if summary is None or _is_placeholder(summary) or _contains_banned_example(summary) or (not _summary_has_ohrpu(summary)):
                             invalid_outputs += 1
                             terminated_reason = "invalid_select_summary"
-                            if args.strict_actions:
-                                invalid_action_terminated += 1
-                                terminated_invalid_action = True
-                                answer_letter = None
-                                break
+                            if retry_idx < int(args.max_retries_per_round):
+                                total_retries += 1
+                                retry_feedback = _retry_feedback_text(
+                                    "Invalid response: include a meaningful <summary> with P/O/H/U/R in that exact order "
+                                    "(no placeholders like '.../none/unknown').",
+                                    force_answer=bool(args.force_final_answer and round_idx >= args.max_rounds),
+                                )
+                                attempt_user_text = f"{user_text}\n\n{retry_feedback}"
+                                continue
+
+                        if (not bool(args.use_candidate_frame_ids)) and _frames_has_range_syntax(frames_text):
+                            invalid_outputs += 1
+                            terminated_reason = "frames_range_syntax"
+                            if retry_idx < int(args.max_retries_per_round):
+                                total_retries += 1
+                                retry_feedback = _retry_feedback_text(
+                                    "Invalid response: <frames> must be a comma-separated list of integers only "
+                                    "(NO ranges like '4-182', no hyphens). Choose up to {k} NEW frames.".format(
+                                        k=args.max_frames_per_round
+                                    ),
+                                    force_answer=bool(args.force_final_answer and round_idx >= args.max_rounds),
+                                )
+                                attempt_user_text = f"{user_text}\n\n{retry_feedback}"
+                                continue
 
                         requested = _dedupe_preserve_order(_parse_frame_indices(frames_text))
                         if bool(args.use_candidate_frame_ids) and candidate_next_frames:
@@ -1222,6 +1251,15 @@ def main() -> int:
                             if invalid_id:
                                 invalid_outputs += 1
                                 terminated_reason = "frames_out_of_range"
+                                if retry_idx < int(args.max_retries_per_round):
+                                    total_retries += 1
+                                    retry_feedback = _retry_feedback_text(
+                                        "Invalid response: when Candidate Frame IDs are provided, <frames> must contain only "
+                                        "IDs in the allowed range [1..K] (comma-separated integers).",
+                                        force_answer=bool(args.force_final_answer and round_idx >= args.max_rounds),
+                                    )
+                                    attempt_user_text = f"{user_text}\n\n{retry_feedback}"
+                                    continue
                                 if args.strict_actions:
                                     invalid_action_terminated += 1
                                     terminated_invalid_action = True
@@ -1238,6 +1276,14 @@ def main() -> int:
                                 if disallowed:
                                     invalid_outputs += 1
                                     terminated_reason = "frames_not_in_candidates"
+                                    if retry_idx < int(args.max_retries_per_round):
+                                        total_retries += 1
+                                        retry_feedback = _retry_feedback_text(
+                                            "Invalid response: requested frames must be chosen ONLY from the candidate unseen frame list/ranges provided.",
+                                            force_answer=bool(args.force_final_answer and round_idx >= args.max_rounds),
+                                        )
+                                        attempt_user_text = f"{user_text}\n\n{retry_feedback}"
+                                        continue
                                     if args.strict_actions:
                                         invalid_action_terminated += 1
                                         terminated_invalid_action = True
@@ -1257,20 +1303,10 @@ def main() -> int:
                         if requested and len(requested) > int(args.max_frames_per_round):
                             invalid_outputs += 1
                             terminated_reason = "too_many_frames"
-                            if args.strict_actions:
-                                invalid_action_terminated += 1
-                                terminated_invalid_action = True
-                                answer_letter = None
-                                break
                             requested = requested[: int(args.max_frames_per_round)]
                         if not requested:
                             invalid_outputs += 1
                             terminated_reason = "invalid_frames"
-                            if args.strict_actions:
-                                invalid_action_terminated += 1
-                                terminated_invalid_action = True
-                                answer_letter = None
-                                break
                             if retry_idx < int(args.max_retries_per_round):
                                 total_retries += 1
                                 candidate_text = (
@@ -1287,6 +1323,11 @@ def main() -> int:
                                 )
                                 attempt_user_text = f"{user_text}\n\n{retry_feedback}"
                                 continue
+                            if args.strict_actions:
+                                invalid_action_terminated += 1
+                                terminated_invalid_action = True
+                                answer_letter = None
+                                break
 
                             # Fall back to heuristic sampling.
                             fallback_frames_used += 1
