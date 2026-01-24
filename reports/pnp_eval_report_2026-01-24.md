@@ -41,6 +41,7 @@
 ### Results (raw)
 - Merged summary: `outputs/2026-01-24/videomme_test_pnp_qwen2p5vl7b_think_ids_tp1/merged.json`
 - Accuracy (includes download failures as wrong): **0.1515** (409 / 2700)
+- Accuracy on nonfailed videos only (merged): **0.4074** (409 / 1004)
 - Failed samples (download/probe): **1696 / 2700**
 - Invalid-action terminated: **5**
 - W&B runs:
@@ -69,6 +70,7 @@
   - The HF dataset itself is metadata-only; we use the **packaged LVBench videos** in the HF repo under `video_chunks/*.zip`.
   - Videos extracted (103 mp4) to: `/tmp/chenwei_video_cache/lvbench` (via `scripts/fetch_lvbench_videos.py`).
   - Frames are resized (max edge 512) before sending to vLLM to avoid `max_model_len=12288` overflow on some high-res frames.
+  - We **scope sampling to `time_reference`** (e.g. `04:19-08:41`) to avoid spending rounds on irrelevant parts of long videos.
 - W&B runs:
   - `https://wandb.ai/cxu-research/revise_benchmarks/runs/5tkicu8y` (shard0)
   - `https://wandb.ai/cxu-research/revise_benchmarks/runs/7exxn915` (shard1)
@@ -80,8 +82,8 @@
   - `outputs/2026-01-24/lvbench_train_pnp_qwen2p5vl7b_think_ids_tp1_hfvid_resized`
 
 ### Results
-- Merged summary: `outputs/2026-01-24/lvbench_train_pnp_qwen2p5vl7b_think_ids_tp1_hfvid_resized/merged.json`
-- Accuracy: **0.2834** (439 / 1549)
-- Avg rounds: **3.4687**; avg effective rounds: **2.5332**
-- Failed: **0**; invalid-action terminated: **41**
-- Prompt log size: **9,116,405 bytes** across **5,578 lines**
+- Merged summary: `outputs/2026-01-24/lvbench_train_pnp_qwen2p5vl7b_think_ids_tp1_hfvid_time_ref/merged.json`
+- Accuracy: **0.4526** (701 / 1549)
+- Avg rounds: **2.3092**; avg effective rounds: **1.2724**
+- Failed: **0**; invalid-action terminated: **5**
+- Prompt log size: **5,853,311 bytes** across **3,602 lines**

@@ -97,6 +97,8 @@ def _merge_results(summaries: list[dict[str, Any]]) -> dict[str, Any]:
     samples = max(0, totals["samples"])
     correct = totals["correct"]
     accuracy = correct / samples if samples else 0.0
+    nonfailed = max(0, samples - totals["failed"])
+    accuracy_nonfailed = correct / nonfailed if nonfailed else 0.0
     total_rounds = totals["total_rounds"] + int(round(weighted_rounds_sum))
     total_effective_rounds = totals["total_effective_rounds"] + int(round(weighted_effective_rounds_sum))
     avg_rounds = total_rounds / samples if samples else 0.0
@@ -106,6 +108,8 @@ def _merge_results(summaries: list[dict[str, Any]]) -> dict[str, Any]:
         "samples": samples,
         "correct": correct,
         "accuracy": accuracy,
+        "nonfailed_samples": nonfailed,
+        "accuracy_nonfailed": accuracy_nonfailed,
         "total_rounds": total_rounds,
         "avg_rounds": avg_rounds,
         "total_effective_rounds": total_effective_rounds,

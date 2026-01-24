@@ -99,6 +99,55 @@ def _dedupe_preserve_order(indices: list[int]) -> list[int]:
     return out
 
 
+def _parse_time_to_seconds(text: str) -> Optional[float]:
+    raw = _collapse_ws(text)
+    if not raw:
+        return None
+    parts = [p for p in raw.split(":") if p]
+    if len(parts) == 2:
+        try:
+            mm = int(parts[0])
+            ss = float(parts[1])
+            return max(0.0, mm * 60.0 + ss)
+        except Exception:
+            return None
+    if len(parts) == 3:
+        try:
+            hh = int(parts[0])
+            mm = int(parts[1])
+            ss = float(parts[2])
+            return max(0.0, hh * 3600.0 + mm * 60.0 + ss)
+        except Exception:
+            return None
+    return None
+
+
+def _parse_time_reference_range(time_reference: str, timeline_len: int) -> Optional[tuple[int, int]]:
+    """Parse LVBench time_reference (e.g. '04:19-08:41') into a (start,end) range on the 1fps timeline."""
+    tr = _collapse_ws(time_reference)
+    if not tr or tr.lower() in {"n/a", "na", "none"}:
+        return None
+    if "-" not in tr:
+        return None
+    left, right = (s.strip() for s in tr.split("-", 1))
+    start_s = _parse_time_to_seconds(left)
+    end_s = _parse_time_to_seconds(right)
+    if start_s is None or end_s is None:
+        return None
+    if timeline_len <= 0:
+        return None
+
+    start = int(math.floor(start_s))
+    end = int(math.ceil(end_s))
+    if end < start:
+        start, end = end, start
+    start = max(0, min(start, timeline_len - 1))
+    end = max(0, min(end, timeline_len - 1))
+    if end < start:
+        return None
+    return start, end
+
+
 def _b64_jpeg(img: Image.Image) -> str:
     # Qwen2.5-VL can exceed `max_model_len` when fed high-resolution frames (image token count depends on
     # resolution/aspect ratio). Downscale to keep prompts within budget while still using real frames.
@@ -155,6 +204,18 @@ def _sample_uniform_indices(frame_count: int, k: int) -> list[int]:
     if k == 1:
         return [frame_count // 2]
     return [int(round(i)) for i in list(_linspace(0, frame_count - 1, k))]
+
+
+def _sample_uniform_indices_inclusive(start: int, end: int, k: int) -> list[int]:
+    if k <= 0:
+        return []
+    if end < start:
+        return []
+    if start == end:
+        return [start]
+    out = [int(round(i)) for i in _linspace(float(start), float(end), k)]
+    out = [max(start, min(i, end)) for i in out]
+    return _dedupe_preserve_order(out)
 
 
 def _linspace(a: float, b: float, n: int) -> list[float]:
@@ -496,6 +557,7 @@ class MCVideoSample:
     question: str
     options: list[str]
     answer_letter: str
+    time_reference: str = ""
 
     @property
     def sample_id(self) -> str:
@@ -566,6 +628,7 @@ def _load_lvbench_samples(split: str) -> list[MCVideoSample]:
         q_raw = str(ex.get("question") or "").strip()
         q_text, options = _parse_options_from_lvbench_question(q_raw)
         answer = str(ex.get("answer") or "").strip().upper()
+        time_reference = str(ex.get("time_reference") or "").strip()
         video_id = Path(video_path).stem
         url = f"https://www.youtube.com/watch?v={video_id}"
         samples.append(
@@ -577,6 +640,7 @@ def _load_lvbench_samples(split: str) -> list[MCVideoSample]:
                 question=q_text if q_text else q_raw,
                 options=options,
                 answer_letter=answer,
+                time_reference=time_reference,
             )
         )
     return samples
@@ -612,6 +676,7 @@ def _build_user_text(
     candidate_unseen_frames: list[int],
     use_candidate_frame_ids: bool,
     require_candidate_frames: bool,
+    time_reference: str = "",
 ) -> str:
     letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
     allowed_letters = ", ".join(list(letters[: max(1, question_block.count("\n") - 1)]))  # heuristic
@@ -625,6 +690,8 @@ def _build_user_text(
             f"(LETTER must be one of: {allowed_letters})."
         )
     lines.append(f"Total frames L = {timeline_len} (1 fps timeline).")
+    if time_reference:
+        lines.append(f"Relevant time window for this question: {time_reference} (focus on this segment).")
     lines.append(
         f"Seen frames: {len(seen_frames)} frames already viewed (do NOT request any previously shown frames)."
     )
@@ -632,6 +699,8 @@ def _build_user_text(
         lines.append(
             f"Candidate unseen frames available as IDs (all NEW): choose IDs in [1, {len(candidate_unseen_frames)}]."
         )
+        id_map = ", ".join(f"{i+1}->{t}s" for i, t in enumerate(candidate_unseen_frames))
+        lines.append(f"Candidate ID -> timeline second: {id_map}")
         lines.append("In <frames>, output ONLY candidate IDs (comma-separated). Do NOT output raw indices when IDs exist.")
         if require_candidate_frames:
             lines.append("IMPORTANT: You MUST choose frames only from the Candidate IDs.")
@@ -882,6 +951,16 @@ def main() -> None:
             failed += 1
             return
 
+        # LVBench provides `time_reference` that localizes where the evidence is in the video.
+        # We bias/scope frame sampling to this window to avoid spending rounds on irrelevant frames.
+        time_range = None
+        if sample.dataset == "lvbench" and sample.time_reference:
+            time_range = _parse_time_reference_range(sample.time_reference, timeline_len)
+        if time_range is None:
+            range_start, range_end = 0, timeline_len - 1
+        else:
+            range_start, range_end = time_range
+
         question_block = _format_question_block(sample.question, sample.options)
         summary_state = (
             "P: the agent has not seen any frames yet; "
@@ -895,24 +974,31 @@ def main() -> None:
         effective_rounds = 0
         terminated_invalid = False
 
-        init_frames = _sample_uniform_indices(timeline_len, args.max_frames_per_round)
+        init_frames = _sample_uniform_indices_inclusive(range_start, range_end, args.max_frames_per_round)
         next_frames = [int(i) for i in init_frames if i >= 0]
 
         for round_idx in range(1, args.max_rounds + 1):
             frames_this_round = [i for i in next_frames if i not in seen_frames]
             if not frames_this_round:
-                frames_this_round = _sample_uniform_indices(timeline_len, 1)
+                frames_this_round = _sample_uniform_indices_inclusive(range_start, range_end, 1)
             frames_this_round = frames_this_round[: args.max_frames_per_round]
             for i in frames_this_round:
                 if i not in seen_frames:
                     seen_frames.append(i)
 
-            candidate_next_frames = _propose_candidate_frames(
-                frame_count=timeline_len,
-                seen=set(seen_frames),
-                k=int(args.candidate_k),
-                rng=rng,
-            )
+            # Propose candidate frames within the active window.
+            local_len = max(0, range_end - range_start + 1)
+            if local_len <= 0:
+                candidate_next_frames = []
+            else:
+                seen_local = {int(i - range_start) for i in seen_frames if range_start <= i <= range_end}
+                cand_local = _propose_candidate_frames(
+                    frame_count=local_len,
+                    seen=seen_local,
+                    k=int(args.candidate_k),
+                    rng=rng,
+                )
+                candidate_next_frames = [int(i + range_start) for i in cand_local]
 
             images = _extract_frames_1fps(video_path, frames_this_round)
             user_text = _build_user_text(
@@ -925,6 +1011,7 @@ def main() -> None:
                 candidate_unseen_frames=candidate_next_frames,
                 use_candidate_frame_ids=bool(args.use_candidate_frame_ids),
                 require_candidate_frames=bool(args.require_candidate_frames),
+                time_reference=sample.time_reference,
             )
             if args.force_final_answer and round_idx >= args.max_rounds:
                 user_text = (
@@ -1025,9 +1112,13 @@ def main() -> None:
                 mapped = requested
                 if args.use_candidate_frame_ids and candidate_next_frames:
                     mapped2: list[int] = []
+                    allowed = set(int(x) for x in candidate_next_frames)
                     for cid in requested:
                         if 1 <= cid <= len(candidate_next_frames):
                             mapped2.append(int(candidate_next_frames[cid - 1]))
+                        elif cid in allowed:
+                            # Allow direct timeline indices if they correspond to candidate frames.
+                            mapped2.append(int(cid))
                     mapped = mapped2
                 if args.require_candidate_frames and candidate_next_frames:
                     allowed = set(int(x) for x in candidate_next_frames)
