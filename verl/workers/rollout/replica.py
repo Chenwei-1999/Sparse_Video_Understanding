@@ -49,6 +49,8 @@ class TokenOutput(BaseModel):
     """response token ids"""
     log_probs: Optional[list[float]] = None
     """logprobs of response token ids"""
+    top_logprobs: Optional[list[dict[int, float]]] = None
+    """Top logprobs per generated token (token_id -> logprob)."""
     routed_experts: Optional[Any] = None
     """routed experts of response token ids"""
     stop_reason: Optional[str] = None

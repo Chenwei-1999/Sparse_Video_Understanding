@@ -526,7 +526,22 @@ class vLLMHttpServer:
         assert max_tokens <= max_possible_tokens, (
             f"max_tokens {max_tokens} exceeds available context space {max_possible_tokens}"
         )
-        sampling_params["logprobs"] = 0 if sampling_params.pop("logprobs", False) else None
+        # Normalize logprobs. Support:
+        # - logprobs=True  -> sampled-token logprob only (top_k=0)
+        # - logprobs=<int> -> top-k logprobs
+        # - unset/False    -> no logprobs
+        raw_logprobs = sampling_params.pop("logprobs", None)
+        if raw_logprobs is True:
+            sampling_params["logprobs"] = 0
+        elif raw_logprobs in (False, None):
+            sampling_params["logprobs"] = None
+        else:
+            sampling_params["logprobs"] = int(raw_logprobs)
+
+        # Optionally return prompt logprobs for scoring tasks.
+        raw_prompt_logprobs = sampling_params.pop("prompt_logprobs", None)
+        if raw_prompt_logprobs is not None:
+            sampling_params["prompt_logprobs"] = int(raw_prompt_logprobs)
         sampling_params.setdefault("repetition_penalty", self.config.get("repetition_penalty", 1.0))
         sampling_params = SamplingParams(max_tokens=max_tokens, **sampling_params)
         prompt_ids = _qwen2_5_vl_dedup_image_tokens(prompt_ids, self.model_config.processor)
@@ -564,8 +579,16 @@ class vLLMHttpServer:
 
         token_ids = final_res.outputs[0].token_ids
         log_probs = None
+        top_logprobs = None
         if sampling_params.logprobs is not None:
             log_probs = [logprobs[token_ids[i]].logprob for i, logprobs in enumerate(final_res.outputs[0].logprobs)]
+            # Preserve the full top-k map for downstream scoring utilities.
+            top_logprobs = []
+            for step in (final_res.outputs[0].logprobs or []):
+                if step is None:
+                    top_logprobs.append({})
+                    continue
+                top_logprobs.append({int(tok_id): float(lp.logprob) for tok_id, lp in step.items()})
 
         routed_experts = None
         if self.config.enable_rollout_routing_replay:
@@ -581,7 +604,11 @@ class vLLMHttpServer:
             stop_reason = finish_reason  # for more stop reason in the future
 
         return TokenOutput(
-            token_ids=token_ids, log_probs=log_probs, routed_experts=routed_experts, stop_reason=stop_reason
+            token_ids=token_ids,
+            log_probs=log_probs,
+            top_logprobs=top_logprobs,
+            routed_experts=routed_experts,
+            stop_reason=stop_reason,
         )
 
     async def wake_up(self):

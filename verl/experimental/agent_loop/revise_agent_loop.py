@@ -470,6 +470,12 @@ class ReviseAgentLoop(AgentLoopBase):
         self.require_candidate_frames = bool(revise_cfg.get("require_candidate_frames", False))
         self.seed = int(revise_cfg.get("seed", 0))
 
+        # Optional EAGER-style margin scoring (for dense, annotation-free rewards).
+        self.compute_margins = bool(revise_cfg.get("compute_margins", False))
+        self.margin_logprobs_k = int(revise_cfg.get("margin_logprobs_k", 64))
+        self.margin_temperature = float(revise_cfg.get("margin_temperature", 1.0))
+        self.summary_only_logprobs_k = int(revise_cfg.get("summary_only_logprobs_k", self.margin_logprobs_k))
+
     async def run(self, sampling_params: dict[str, Any], **kwargs) -> AgentLoopOutput:
         extra_info = kwargs.get("extra_info", {})
         reward_model = kwargs.get("reward_model", {})
@@ -632,6 +638,14 @@ class ReviseAgentLoop(AgentLoopBase):
         terminated_reason: Optional[str] = None
         terminated_invalid_action = 0
 
+        # EAGER-style scoring signals (optional; only populated when enabled via config).
+        margins: list[float] = []
+        margin_pred_letters: list[str] = []
+        actions: list[str] = []
+        format_by_round: list[float] = []
+        summary_only_pred_letter: Optional[str] = None
+        summary_only_correct = 0.0
+
         retries_left = [self.max_retries]
 
         illegal_reasons = {
@@ -672,6 +686,97 @@ class ReviseAgentLoop(AgentLoopBase):
                 total_retries += 1
             return ok
 
+        def _option_letters(num: int) -> list[str]:
+            n = int(num or 0)
+            if n <= 0:
+                n = 5
+            return [chr(ord("A") + i) for i in range(n)]
+
+        def _letter_token_id(letter: str) -> Optional[int]:
+            ids = self.tokenizer.encode(str(letter), add_special_tokens=False)
+            if len(ids) != 1:
+                return None
+            return int(ids[0])
+
+        option_letters = _option_letters(len(choices))
+        option_token_ids: dict[str, int] = {}
+        for l in option_letters:
+            tid = _letter_token_id(l)
+            if tid is not None:
+                option_token_ids[l] = tid
+
+        answer_idx = ground_truth.get("answer_idx") if isinstance(ground_truth, dict) else None
+        correct_letter: Optional[str] = None
+        try:
+            if answer_idx is not None:
+                correct_letter = chr(ord("A") + int(answer_idx))
+        except Exception:
+            correct_letter = None
+
+        SCORE_SYSTEM_PROMPT = (
+            "You are a multiple-choice video QA classifier. "
+            "Given the question, options, current summary, and video frames, "
+            "output ONLY the single best option letter (A/B/C/D/E)."
+        )
+        SCORE_SUMMARY_ONLY_SYSTEM_PROMPT = (
+            "You are a multiple-choice QA classifier. "
+            "Given the question, options, and the summary (no video frames), "
+            "output ONLY the single best option letter (A/B/C/D/E)."
+        )
+
+        async def _score_letter_logprobs(
+            *,
+            system_prompt: str,
+            user_text: str,
+            images: Optional[list[Image.Image]],
+            logprobs_k: int,
+            temperature: float,
+        ) -> Optional[dict[int, float]]:
+            if not option_token_ids:
+                return None
+            score_messages = _with_images(
+                [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_text},
+                ],
+                images or [],
+            )
+            score_prompt_ids = await self.apply_chat_template(score_messages, images=images if images else None)
+            if len(score_prompt_ids) >= self.max_model_len:
+                return None
+            try:
+                out = await self.server_manager.generate(
+                    request_id=uuid4().hex,
+                    prompt_ids=score_prompt_ids,
+                    sampling_params={
+                        "max_tokens": 1,
+                        "temperature": float(temperature),
+                        "top_p": 1.0,
+                        "logprobs": int(max(0, logprobs_k)),
+                    },
+                    image_data=images if images else None,
+                    video_data=None,
+                )
+            except Exception:
+                return None
+            if not out.top_logprobs:
+                return None
+            return out.top_logprobs[0] or {}
+
+        def _margin_from_logprobs(lp: dict[int, float]) -> tuple[float, str]:
+            """Return (margin, argmax_letter) for the current state."""
+            # Gather letter logprobs; fall back to a very small value when absent.
+            letter_lps: dict[str, float] = {}
+            for l, tid in option_token_ids.items():
+                letter_lps[l] = float(lp.get(int(tid), -1e9))
+            # Argmax among letters.
+            pred = max(letter_lps.items(), key=lambda kv: kv[1])[0] if letter_lps else "A"
+            if correct_letter is None or correct_letter not in letter_lps:
+                return 0.0, pred
+            correct_lp = letter_lps[correct_letter]
+            best_other = max((v for k, v in letter_lps.items() if k != correct_letter), default=-1e9)
+            return float(correct_lp - best_other), pred
+
         for round_idx in range(1, self.max_rounds + 1):
             num_rounds = round_idx
 
@@ -682,6 +787,28 @@ class ReviseAgentLoop(AgentLoopBase):
                     self.max_model_len,
                 )
                 break
+
+            # Compute EAGER margin m_t for the current state (before acting).
+            if self.compute_margins and correct_letter is not None:
+                score_user_text = (
+                    f"{question_block}\n\n"
+                    f"Current summary:\n{summary_state}\n\n"
+                    f"Output ONLY one letter from: {', '.join(option_letters)}."
+                )
+                lp = await _score_letter_logprobs(
+                    system_prompt=SCORE_SYSTEM_PROMPT,
+                    user_text=score_user_text,
+                    images=all_images,
+                    logprobs_k=self.margin_logprobs_k,
+                    temperature=self.margin_temperature,
+                )
+                if lp is None:
+                    margins.append(0.0)
+                    margin_pred_letters.append("")
+                else:
+                    m_t, pred = _margin_from_logprobs(lp)
+                    margins.append(float(m_t))
+                    margin_pred_letters.append(pred)
 
             with simple_timer("generate_sequences", {}):
                 try:
@@ -745,6 +872,8 @@ class ReviseAgentLoop(AgentLoopBase):
                         summary_state = summary
                 answer_text = normalized
                 format_valid = True
+                actions.append("answer")
+                format_by_round.append(1.0)
                 break
 
             if frames_text is None:
@@ -967,6 +1096,8 @@ class ReviseAgentLoop(AgentLoopBase):
                 response_logprobs += [0.0] * len(selected_user_ids)
             candidate_unseen = selected_candidate_unseen
             effective_rounds += 1
+            actions.append("select")
+            format_by_round.append(1.0)
 
         # If no answer was produced, force a final answer attempt
         if answer_text is None and terminated_invalid_action == 0:
@@ -982,6 +1113,30 @@ class ReviseAgentLoop(AgentLoopBase):
                 retries_left,
                 force_answer=True,
             )
+
+            # We won't enter another normal round to score m_t for the final state; compute it here
+            # so the last Select can still receive a confidence-gain signal.
+            if self.compute_margins and correct_letter is not None:
+                score_user_text = (
+                    f"{question_block}\n\n"
+                    f"Current summary:\n{summary_state}\n\n"
+                    f"Output ONLY one letter from: {', '.join(option_letters)}."
+                )
+                lp = await _score_letter_logprobs(
+                    system_prompt=SCORE_SYSTEM_PROMPT,
+                    user_text=score_user_text,
+                    images=all_images,
+                    logprobs_k=self.margin_logprobs_k,
+                    temperature=self.margin_temperature,
+                )
+                if lp is None:
+                    margins.append(0.0)
+                    margin_pred_letters.append("")
+                else:
+                    m_t, pred = _margin_from_logprobs(lp)
+                    margins.append(float(m_t))
+                    margin_pred_letters.append(pred)
+
             if len(prompt_ids) < self.max_model_len:
                 try:
                     output = await self.server_manager.generate(
@@ -1005,11 +1160,33 @@ class ReviseAgentLoop(AgentLoopBase):
                     response_logprobs += output.log_probs
                 last_response_text = self.tokenizer.decode(response_ids, skip_special_tokens=True)
                 messages.append({"role": "assistant", "content": last_response_text})
-                answer_text = _extract_tag(last_response_text, _ANSWER_RE)
+                forced_answer = _extract_tag(last_response_text, _ANSWER_RE)
+                answer_text = _normalize_answer_letter(forced_answer or "", len(choices))
                 forced_summary = _extract_tag(last_response_text, _SUMMARY_RE)
                 if forced_summary is not None:
                     summary_state = forced_summary
                 format_valid = answer_text is not None
+                actions.append("answer")
+                format_by_round.append(1.0 if format_valid else 0.0)
+
+        # Summary-only sufficiency signal for EAGER (evaluate answerability from summary alone).
+        if self.compute_margins and correct_letter is not None and answer_text is not None:
+            summary_user_text = (
+                f"{question_block}\n\n"
+                f"Summary:\n{summary_state}\n\n"
+                f"Output ONLY one letter from: {', '.join(option_letters)}."
+            )
+            lp = await _score_letter_logprobs(
+                system_prompt=SCORE_SUMMARY_ONLY_SYSTEM_PROMPT,
+                user_text=summary_user_text,
+                images=None,
+                logprobs_k=self.summary_only_logprobs_k,
+                temperature=self.margin_temperature,
+            )
+            if lp is not None:
+                _, pred = _margin_from_logprobs(lp)
+                summary_only_pred_letter = pred
+                summary_only_correct = 1.0 if pred == correct_letter else 0.0
 
         # Prepare output
         response_ids = prompt_ids[-len(response_mask) :] if response_mask else []
@@ -1030,6 +1207,15 @@ class ReviseAgentLoop(AgentLoopBase):
             "frames_all_seen": frames_all_seen,
             "terminated_reason": terminated_reason,
             "illegal_action": terminated_invalid_action,
+            # Optional EAGER signals (only populated when compute_margins=True).
+            "margins": margins,
+            "margin_pred_letters": margin_pred_letters,
+            "actions": actions,
+            "format_by_round": format_by_round,
+            "summary_only_pred": summary_only_pred_letter,
+            "summary_only_correct": summary_only_correct,
+            "margin_logprobs_k": self.margin_logprobs_k,
+            "margin_temperature": self.margin_temperature,
         }
 
         # Optional: summary-only correctness approximation
