@@ -17,9 +17,9 @@
 |---|---:|---|
 | Caption + Qwen7B | **0.6519** (3257/4996) | `outputs/2026-01-25/nextqa_caption_compare_qwen2p5vl7b/caption_only_val_tp1/merged.json` (avg caption chars ≈ 9720) |
 | Our method (REVISE, frames) | **0.6239** (3117/4996) | `outputs/2026-01-24/nextqa_val_full_pnp_qwen2p5vl7b_ids_tp1/merged.json` |
-| Our method + caption | **RUNNING** | Output dir: `outputs/2026-01-25/nextqa_caption_compare_qwen2p5vl7b/revise_plus_caption_val_tp1_ts/` (4 shards, TP=1 per GPU). |
+| Our method + caption | **0.6207** (3101/4996) | `outputs/2026-01-25/nextqa_caption_compare_qwen2p5vl7b/revise_plus_caption_val_tp1_ts/merged.json` |
 | Caption-only REVISE (multi-turn) | **0.5633** (2814/4996) | `outputs/2026-01-25/nextqa_caption_compare_qwen2p5vl7b/caption_revise_val_tp1_ts/merged.json` (invalid_action_terminated=258) |
-| VideoAgent (caption retrieval, local vLLM) | **TBD** | Script: `examples/videoagent/eval_nextqa_videoagent_caption_vllm.py` + runner `scripts/run_nextqa_videoagent_caption_val_tp1.sh`. |
+| VideoAgent (caption retrieval, local vLLM) | **0.5873** (2934/4996) | `outputs/2026-01-25/nextqa_caption_compare_qwen2p5vl7b/videoagent_caption_val_tp1/merged.json` |
 
 ## Commands (reference)
 Caption-only (4 shards, TP=1 per GPU):
