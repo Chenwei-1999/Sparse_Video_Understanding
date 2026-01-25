@@ -34,6 +34,7 @@ def _merge_results(summaries: list[dict[str, Any]]) -> dict[str, Any]:
         "correct": 0,
         "total_rounds": 0,
         "total_effective_rounds": 0,
+        "total_frames_used": 0,
         "failed": 0,
         "invalid_outputs": 0,
         "invalid_action_terminated": 0,
@@ -46,6 +47,7 @@ def _merge_results(summaries: list[dict[str, Any]]) -> dict[str, Any]:
     shard_elapsed: list[float] = []
     weighted_rounds_sum = 0.0
     weighted_effective_rounds_sum = 0.0
+    weighted_frames_used_sum = 0.0
 
     shard_infos: list[dict[str, Any]] = []
     for s in summaries:
@@ -53,6 +55,7 @@ def _merge_results(summaries: list[dict[str, Any]]) -> dict[str, Any]:
         shard_samples = _as_int(r.get("samples"))
         shard_avg_rounds = _as_float(r.get("avg_rounds"))
         shard_avg_eff_rounds = _as_float(r.get("avg_effective_rounds"))
+        shard_avg_frames_used = _as_float(r.get("avg_frames_used"))
 
         totals["samples"] += shard_samples
         totals["correct"] += _as_int(r.get("correct"))
@@ -68,6 +71,12 @@ def _merge_results(summaries: list[dict[str, Any]]) -> dict[str, Any]:
             weighted_effective_rounds_sum += shard_avg_eff_rounds * shard_samples
         else:
             totals["total_effective_rounds"] += _as_int(shard_total_eff_rounds)
+
+        shard_total_frames_used = r.get("total_frames_used")
+        if shard_total_frames_used is None:
+            weighted_frames_used_sum += shard_avg_frames_used * shard_samples
+        else:
+            totals["total_frames_used"] += _as_int(shard_total_frames_used)
 
         totals["failed"] += _as_int(r.get("failed"))
         totals["invalid_outputs"] += _as_int(r.get("invalid_outputs"))
@@ -88,6 +97,7 @@ def _merge_results(summaries: list[dict[str, Any]]) -> dict[str, Any]:
                 "correct": _as_int(r.get("correct")),
                 "accuracy": _as_float(r.get("accuracy")),
                 "avg_rounds": shard_avg_rounds,
+                "avg_frames_used": shard_avg_frames_used,
                 "prompt_log_jsonl": s.get("prompt_log_jsonl"),
                 "wandb_id": wandb.get("id"),
                 "wandb_url": wandb.get("url"),
@@ -103,6 +113,8 @@ def _merge_results(summaries: list[dict[str, Any]]) -> dict[str, Any]:
     total_effective_rounds = totals["total_effective_rounds"] + int(round(weighted_effective_rounds_sum))
     avg_rounds = total_rounds / samples if samples else 0.0
     avg_effective_rounds = total_effective_rounds / samples if samples else 0.0
+    total_frames_used = totals["total_frames_used"] + int(round(weighted_frames_used_sum))
+    avg_frames_used = total_frames_used / samples if samples else 0.0
 
     merged = {
         "samples": samples,
@@ -112,6 +124,8 @@ def _merge_results(summaries: list[dict[str, Any]]) -> dict[str, Any]:
         "accuracy_nonfailed": accuracy_nonfailed,
         "total_rounds": total_rounds,
         "avg_rounds": avg_rounds,
+        "total_frames_used": total_frames_used,
+        "avg_frames_used": avg_frames_used,
         "total_effective_rounds": total_effective_rounds,
         "avg_effective_rounds": avg_effective_rounds,
         "failed": totals["failed"],

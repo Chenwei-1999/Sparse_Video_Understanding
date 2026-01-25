@@ -1060,6 +1060,12 @@ def main() -> int:
         default=True,
         help="If no <answer> is produced within max rounds, issue a final answer-only request (matches ReviseAgentLoop).",
     )
+    parser.add_argument(
+        "--answer-only-final-round",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="If enabled, reject <answer> outputs before the final round; the model must request frames until max_rounds.",
+    )
     parser.add_argument("--use-wandb", action="store_true", help="Log eval metrics to Weights & Biases.")
     parser.add_argument("--wandb-project", default=os.getenv("WANDB_PROJECT", "verl-revise"))
     parser.add_argument("--wandb-entity", default=os.getenv("WANDB_ENTITY"))
@@ -1177,6 +1183,7 @@ def main() -> int:
                 "caption_max_chars": int(getattr(args, "caption_max_chars", 0)),
                 "strict_actions": bool(args.strict_actions),
                 "force_final_answer": args.force_final_answer,
+                "answer_only_final_round": bool(args.answer_only_final_round),
                 "resume_from_log": args.resume_from_log,
                 "initial_completed": resume_completed,
                 "log_jsonl": args.log_jsonl,
@@ -1189,8 +1196,10 @@ def main() -> int:
         total_retries = 0
         fallback_frames_used = 0
         effective_rounds_total = 0
+        total_frames_used = 0
         for sample in samples[resume_completed:]:
             processed += 1
+            seen_frames: list[int] = []
             try:
                 frame_count = sample.frame_count
                 if frame_count <= 0 and getattr(args, "observation_mode", "image") != "caption":
@@ -1221,7 +1230,6 @@ def main() -> int:
                     "U: some key detail may still be unclear; "
                     "R: request more evidence if needed"
                 )
-                seen_frames: list[int] = []
                 effective_rounds = 0
                 terminated_reason: Optional[str] = None
                 terminated_invalid_action = False
@@ -1459,6 +1467,33 @@ def main() -> int:
                                     answer_letter = None
                                     break
                                 # Non-strict: ignore the invalid answer and continue with a fallback frame.
+                                fallback_frames_used += 1
+                                next_frames = _sample_unseen_frames(
+                                    frame_count, set(seen_frames), args.max_frames_per_round, rng=rng
+                                )
+                                if not next_frames:
+                                    next_frames = _sample_uniform_indices(frame_count, 1)
+                                answer_letter = None
+                                break
+
+                            if bool(args.answer_only_final_round) and round_idx < args.max_rounds:
+                                invalid_outputs += 1
+                                terminated_reason = "early_answer_disallowed"
+                                if retry_idx < int(args.max_retries_per_round):
+                                    total_retries += 1
+                                    retry_feedback = _retry_feedback_text(
+                                        "Invalid response: do NOT answer yet. Request more frames using <summary>...</summary> and <frames>...</frames>.",
+                                        force_answer=False,
+                                    )
+                                    attempt_user_text = f"{user_text}\n\n{retry_feedback}"
+                                    answer_letter = None
+                                    continue
+                                if args.strict_actions:
+                                    invalid_action_terminated += 1
+                                    terminated_invalid_action = True
+                                    answer_letter = None
+                                    break
+                                # Non-strict: ignore the early answer and continue with a fallback frame request.
                                 fallback_frames_used += 1
                                 next_frames = _sample_unseen_frames(
                                     frame_count, set(seen_frames), args.max_frames_per_round, rng=rng
@@ -1724,6 +1759,7 @@ def main() -> int:
                     pred_idx = ord(answer_letter) - ord("A")
                     if pred_idx == sample.answer_idx:
                         correct += 1
+                total_frames_used += len(seen_frames)
             except Exception as e:
                 failed += 1
                 total_rounds += args.max_rounds
@@ -1746,6 +1782,7 @@ def main() -> int:
                 acc = correct / max(1, processed)
                 avg_rounds = total_rounds / max(1, processed)
                 calls_per_sample = total_model_calls / max(1, processed)
+                avg_frames_used = total_frames_used / max(1, processed)
                 print(
                     f"[{processed}/{len(samples)}] acc={acc:.4f} avg_rounds={avg_rounds:.3f} "
                     f"failed={failed} invalid={invalid_outputs} retries={total_retries} "
@@ -1758,6 +1795,7 @@ def main() -> int:
                         "eval/acc": acc,
                         "eval/avg_rounds": avg_rounds,
                         "eval/avg_effective_rounds": effective_rounds_total / max(1, processed),
+                        "eval/avg_frames_used": avg_frames_used,
                         "eval/failed": failed,
                         "eval/processed": processed,
                         "eval/elapsed_s": elapsed,
@@ -1776,12 +1814,15 @@ def main() -> int:
         elapsed = time.time() - start_eval
         prompt_log_lines = _count_file_lines(args.log_jsonl) if args.log_jsonl else 0
         prompt_log_bytes = os.path.getsize(args.log_jsonl) if args.log_jsonl and os.path.exists(args.log_jsonl) else 0
+        avg_frames_used = total_frames_used / max(1, processed)
         results = {
             "samples": processed,
             "correct": correct,
             "accuracy": acc,
             "total_rounds": total_rounds,
             "avg_rounds": avg_rounds,
+            "total_frames_used": total_frames_used,
+            "avg_frames_used": avg_frames_used,
             "total_effective_rounds": effective_rounds_total,
             "avg_effective_rounds": effective_rounds_total / max(1, processed),
             "failed": failed,
@@ -1801,6 +1842,7 @@ def main() -> int:
                 "eval/final_acc": acc,
                 "eval/final_avg_rounds": avg_rounds,
                 "eval/final_avg_effective_rounds": effective_rounds_total / max(1, processed),
+                "eval/final_avg_frames_used": avg_frames_used,
                 "eval/final_failed": failed,
                 "eval/final_elapsed_s": elapsed,
                 "eval/prompt_log_lines": prompt_log_lines,
@@ -1820,6 +1862,7 @@ def main() -> int:
             run.summary["final_acc"] = acc
             run.summary["final_avg_rounds"] = avg_rounds
             run.summary["final_avg_effective_rounds"] = effective_rounds_total / max(1, processed)
+            run.summary["final_avg_frames_used"] = avg_frames_used
             run.summary["final_failed"] = failed
             run.summary["invalid_outputs"] = invalid_outputs
             run.summary["invalid_action_terminated"] = invalid_action_terminated
@@ -1857,6 +1900,7 @@ def main() -> int:
                         "use_candidate_frames": bool(args.use_candidate_frames),
                         "use_candidate_frame_ids": bool(args.use_candidate_frame_ids),
                         "require_candidate_frames": bool(getattr(args, "require_candidate_frames", False)),
+                        "answer_only_final_round": bool(args.answer_only_final_round),
                         "results": results,
                         "prompt_log_jsonl": args.log_jsonl,
                         "prompt_log_lines": prompt_log_lines,
