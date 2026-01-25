@@ -34,6 +34,7 @@ _ANSWER_RE = re.compile(r"<answer>(.*?)</answer>", re.DOTALL | re.IGNORECASE)
 _THINK_RE = re.compile(r"<think>(.*?)</think>", re.DOTALL | re.IGNORECASE)
 
 _CAPTION_CACHE: dict[str, dict[int, str]] = {}
+_FPS_CACHE: dict[str, float] = {}
 
 
 def _truncate_text(text: str, max_chars: int) -> str:
@@ -70,6 +71,28 @@ def _load_video_captions(captions_dir: str, video_id: str) -> dict[int, str]:
                 captions[idx] = v.strip()
     _CAPTION_CACHE[video_id] = captions
     return captions
+
+
+def _get_video_fps(video_path: str) -> float:
+    cached = _FPS_CACHE.get(video_path)
+    if cached is not None:
+        return cached
+    fps = 0.0
+    try:
+        import decord
+
+        vr = decord.VideoReader(video_path, ctx=decord.cpu(0))
+        fps = float(vr.get_avg_fps())
+    except Exception:
+        fps = 0.0
+    _FPS_CACHE[video_path] = fps
+    return fps
+
+
+def _caption_key_for_frame_index(frame_idx: int, fps: float) -> int:
+    if fps and fps > 0:
+        return max(0, int(frame_idx / fps))
+    return int(frame_idx)
 
 
 DEFAULT_SYSTEM_PROMPT = (
@@ -120,6 +143,54 @@ DEFAULT_SYSTEM_PROMPT = (
     "- In P, describe previously seen frames in a sentence (describe content; do NOT list frame indices or use Python lists like [4, 8, 12]).\n"
     "- In <answer>, output EXACTLY ONE option letter shown in the question (e.g., A/B/C/D/E). No words/punctuation.\n"
     "- Never copy the example text; replace it with information from the current video.\n"
+)
+
+
+DEFAULT_SYSTEM_PROMPT_CAPTION_ONLY = (
+    "You are REVISE, a multi-round video reasoning agent.\n"
+    "In this run you will NOT receive images. Instead, each round you will see: "
+    "(1) a multiple-choice question with options, (2) the current belief summary, "
+    "and (3) caption observations sampled at ~1 fps (caption index ≈ timestamp in seconds).\n"
+    "If you are confident, answer the question.\n"
+    "If you are NOT confident, request MORE caption indices to view NEXT.\n\n"
+    "IMPORTANT: Output must follow EXACTLY ONE of the two formats below. Do not output any text outside tags.\n"
+    "Output ONLY <summary> plus either <frames> (request) OR <answer> (final).\n"
+    "Do NOT output <think>.\n"
+    "Do NOT output bare placeholders like '...', 'none', or 'N/A' as your summary fields.\n"
+    "It's OK to say something is unclear/unknown *within a sentence*, but do not leave fields empty.\n\n"
+    "Format 1 — Request more indices (use this only if NOT confident):\n"
+    "<summary>P: previously seen captions describe what has happened so far; "
+    "O: I observe events/objects mentioned in the shown captions that may be relevant; "
+    "H: based on the evidence so far, my belief is updated but still incomplete; "
+    "U: a key detail needed to answer is still unclear; "
+    "R: request additional caption indices to gather the missing evidence</summary>\n"
+    "<frames>1, 3</frames>\n\n"
+    "Format 2 — Answer now (use this if confident):\n"
+    "<summary>P: previously seen captions already contain the key evidence; "
+    "O: the answer-relevant evidence is present in the shown captions; "
+    "H: my belief is updated based on the observed evidence; "
+    "U: no remaining ambiguity that affects the answer; "
+    "R: answered</summary>\n"
+    "<answer>B</answer>\n\n"
+    "Tag meanings:\n"
+    "- <summary>: the ONLY persistent memory across rounds. Keep it short and update it EVERY round.\n"
+    "  The summary MUST be written in this exact order: P → O → H → U → R.\n"
+    "  - P (Previously seen): what has already been observed in earlier rounds.\n"
+    "  - O (Observations): what you currently observe in the shown captions.\n"
+    "  - H (Belief updates): updated belief based on what has been observed so far (do NOT include the final answer letter).\n"
+    "  - U (Uncertainties): what is still unknown or ambiguous.\n"
+    "  - R (Reasons): why you need more evidence and what you are looking for next (or 'answered').\n\n"
+    "Rules:\n"
+    "- Caption indices are 0-based in [0, L-1].\n"
+    "- If you are confident, answer instead of requesting more indices.\n"
+    "- If requesting, choose 1 to {max_frames_per_round} NEW indices to view NEXT.\n"
+    "- Do NOT output any index from the Seen list; those are already viewed.\n"
+    "- When provided, request indices ONLY within the allowed unseen ranges.\n"
+    "- In <frames>, output comma-separated integers only (no brackets, no text).\n"
+    "- In <summary>, include P/O/H/U/R as short natural-language sentences that reflect your current understanding.\n"
+    "- The order inside <summary> MUST be: P then O then H then U then R.\n"
+    "- In <answer>, output EXACTLY ONE option letter shown in the question (e.g., A/B/C/D/E). No words/punctuation.\n"
+    "- Never copy the example text; replace it with information from the current captions.\n"
 )
 
 
@@ -289,6 +360,21 @@ def _summary_has_ohrpu(summary_text: str) -> bool:
     return all(a < b for a, b in zip(positions, positions[1:], strict=False))
 
 
+def _summary_has_stale_boilerplate(summary_text: str, *, seen_count: int) -> bool:
+    if not summary_text or seen_count <= 0:
+        return False
+    s = _collapse_ws(summary_text).lower()
+    if "has not seen any frames yet" in s:
+        return True
+    if re.search(r"\bhas not seen any (frame|frames|caption|captions) yet\b", s):
+        return True
+    if "no frames yet" in s:
+        return True
+    if "no captions yet" in s:
+        return True
+    return False
+
+
 def _b64_jpeg(img: Image.Image) -> str:
     buf = io.BytesIO()
     img.save(buf, format="JPEG", quality=90)
@@ -337,6 +423,7 @@ def _build_user_text(
     frame_indices: list[int],
     seen_frames: list[int],
     *,
+    render_images: bool = True,
     hide_seen_frames: bool = False,
     candidate_unseen_frames: Optional[list[int]] = None,
     use_candidate_frame_ids: bool = False,
@@ -395,14 +482,24 @@ def _build_user_text(
                 lines.append(f"{idx}: {cap}")
 
     lines.append("Frames shown in this round:")
-    if hide_seen_frames or (candidate_unseen_frames and use_candidate_frame_ids):
-        # Avoid leaking/copying raw frame indices when the action space is candidate IDs.
-        for i, _ in enumerate(frame_indices):
-            label = chr(ord("A") + i)
-            lines.append(f"Shown frame {label} <image>")
+    if render_images:
+        if hide_seen_frames or (candidate_unseen_frames and use_candidate_frame_ids):
+            # Avoid leaking/copying raw frame indices when the action space is candidate IDs.
+            for i, _ in enumerate(frame_indices):
+                label = chr(ord("A") + i)
+                lines.append(f"Shown frame {label} <image>")
+        else:
+            for idx in frame_indices:
+                lines.append(f"Frame {idx} <image>")
     else:
-        for idx in frame_indices:
-            lines.append(f"Frame {idx} <image>")
+        # Caption-only / text-only mode: do not include "<image>" placeholders.
+        if hide_seen_frames or (candidate_unseen_frames and use_candidate_frame_ids):
+            for i, _ in enumerate(frame_indices):
+                label = chr(ord("A") + i)
+                lines.append(f"Shown frame {label}")
+        else:
+            for idx in frame_indices:
+                lines.append(f"Frame {idx}")
     return "\n".join(lines)
 
 
@@ -867,6 +964,12 @@ def main() -> int:
         help="Do not print explicit seen frame indices in the prompt (reduces copying); rely on unseen ranges instead.",
     )
     parser.add_argument(
+        "--observation-mode",
+        choices=["image", "caption"],
+        default="image",
+        help="Observation source per round: 'image' shows video frames; 'caption' is caption-only (no images).",
+    )
+    parser.add_argument(
         "--captions-dir",
         default=None,
         help="Optional directory containing per-video caption JSON files named <video_id>_cap.json.",
@@ -956,6 +1059,13 @@ def main() -> int:
         if not os.path.isdir(str(args.captions_dir)):
             raise ValueError(f"--captions-dir does not exist or is not a directory: {args.captions_dir}")
 
+    if getattr(args, "observation_mode", "image") == "caption":
+        if not getattr(args, "captions_dir", None):
+            raise ValueError("--observation-mode caption requires --captions-dir to be set.")
+        if getattr(args, "caption_include", "none") == "none":
+            # Caption-only REVISE needs at least shown captions to be meaningful.
+            args.caption_include = "shown"
+
     random.seed(args.seed)
     rng = random.Random(args.seed)
 
@@ -1023,6 +1133,7 @@ def main() -> int:
                 "map_json": args.map_json,
                 "model_path": args.model_path,
                 "engine": "vllm",
+                "observation_mode": getattr(args, "observation_mode", "image"),
                 "tensor_parallel_size": args.tensor_parallel_size,
                 "dtype": args.dtype,
                 "max_model_len": args.max_model_len,
@@ -1060,7 +1171,7 @@ def main() -> int:
             processed += 1
             try:
                 frame_count = sample.frame_count
-                if frame_count <= 0:
+                if frame_count <= 0 and getattr(args, "observation_mode", "image") != "caption":
                     try:
                         import decord
 
@@ -1070,23 +1181,57 @@ def main() -> int:
                         frame_count = 0
 
                 question_block = _format_question(sample.question, sample.choices)
-                system_prompt = DEFAULT_SYSTEM_PROMPT.format(max_frames_per_round=args.max_frames_per_round)
+                prompt_template = (
+                    DEFAULT_SYSTEM_PROMPT_CAPTION_ONLY
+                    if getattr(args, "observation_mode", "image") == "caption"
+                    else DEFAULT_SYSTEM_PROMPT
+                )
+                system_prompt = prompt_template.format(max_frames_per_round=args.max_frames_per_round)
 
                 video_captions: dict[int, str] = {}
                 if getattr(args, "captions_dir", None) and getattr(args, "caption_include", "none") != "none":
                     video_captions = _load_video_captions(str(args.captions_dir), sample.video_id)
 
                 summary_state = (
-                    "P: the agent has not seen any frames yet; "
-                    "O: no reliable observation yet; "
-                    "H: my belief will be updated based on what is observed; "
-                    "U: key detail is still unclear; "
-                    "R: need evidence from frames"
+                    "P: I will summarize what has been shown so far; "
+                    "O: I will record the key observations from the current evidence; "
+                    "H: I will update my belief as new evidence arrives; "
+                    "U: some key detail may still be unclear; "
+                    "R: request more evidence if needed"
                 )
                 seen_frames: list[int] = []
                 effective_rounds = 0
                 terminated_reason: Optional[str] = None
                 terminated_invalid_action = False
+
+                # Caption-only mode uses caption indices (1fps) as the action space length L.
+                observation_mode = getattr(args, "observation_mode", "image")
+                fps = 0.0
+                if observation_mode == "caption":
+                    if video_captions:
+                        frame_count = max(video_captions.keys(), default=-1) + 1
+                    if frame_count <= 0:
+                        # Fall back to a rough seconds estimate from video length, if available.
+                        try:
+                            import decord
+
+                            vr = decord.VideoReader(sample.video_path, ctx=decord.cpu(0))
+                            video_len = int(len(vr))
+                            fps = float(vr.get_avg_fps()) if hasattr(vr, "get_avg_fps") else 0.0
+                            if fps and fps > 0 and video_len > 0:
+                                frame_count = max(1, int(video_len / fps))
+                        except Exception:
+                            frame_count = max(1, int(sample.frame_count) if int(sample.frame_count) > 0 else 1)
+                elif video_captions:
+                    fps = _get_video_fps(sample.video_path)
+
+                def _caption_for_index(idx: int) -> str:
+                    if not video_captions:
+                        return "[no caption]"
+                    key = int(idx)
+                    if observation_mode != "caption":
+                        key = _caption_key_for_frame_index(int(idx), fps)
+                    return video_captions.get(int(key)) or "[no caption]"
 
                 init_frames = _sample_uniform_indices(frame_count, args.max_frames_per_round)
                 next_frames = [int(i) for i in init_frames if i >= 0]
@@ -1121,15 +1266,17 @@ def main() -> int:
                         max_chars = int(getattr(args, "caption_max_chars", 0))
                         if include in ("shown", "both"):
                             shown_captions = [
-                                _truncate_text(video_captions.get(i) or "[no caption]", max_chars)
+                                _truncate_text(_caption_for_index(int(i)), max_chars)
                                 for i in frames_this_round
                             ]
                         if include in ("candidate", "both") and candidate_next_frames:
                             candidate_captions = [
-                                _truncate_text(video_captions.get(i) or "[no caption]", max_chars)
+                                _truncate_text(_caption_for_index(int(i)), max_chars)
                                 for i in candidate_next_frames
                             ]
-                    images = _extract_frames(sample.video_path, frames_this_round)
+                    images: list[Image.Image] = []
+                    if observation_mode != "caption":
+                        images = _extract_frames(sample.video_path, frames_this_round)
                     user_text = _build_user_text(
                         question_block=question_block,
                         summary=summary_state,
@@ -1137,6 +1284,7 @@ def main() -> int:
                         round_idx=round_idx,
                         frame_indices=frames_this_round,
                         seen_frames=seen_frames,
+                        render_images=(observation_mode != "caption"),
                         hide_seen_frames=bool(getattr(args, "hide_seen_frames_in_prompt", False)),
                         candidate_unseen_frames=candidate_next_frames if getattr(args, "use_candidate_frames", False) else None,
                         use_candidate_frame_ids=bool(args.use_candidate_frame_ids),
@@ -1201,6 +1349,7 @@ def main() -> int:
                                 "question": sample.question,
                                 "choices": sample.choices,
                                 "ground_truth_idx": sample.answer_idx,
+                                "observation_mode": observation_mode,
                                 "use_candidate_frames": bool(getattr(args, "use_candidate_frames", False)),
                                 "use_candidate_frame_ids": bool(args.use_candidate_frame_ids),
                                 "candidate_unseen_frames": candidate_next_frames if getattr(args, "use_candidate_frames", False) else None,
@@ -1221,7 +1370,13 @@ def main() -> int:
                         )
 
                         summary = _extract_tag(raw, _SUMMARY_RE)
-                        if summary and (not _is_placeholder(summary)) and (not _contains_banned_example(summary)) and _summary_has_ohrpu(summary):
+                        if (
+                            summary
+                            and (not _is_placeholder(summary))
+                            and (not _contains_banned_example(summary))
+                            and _summary_has_ohrpu(summary)
+                            and (not _summary_has_stale_boilerplate(summary, seen_count=len(seen_frames)))
+                        ):
                             summary_state = summary
 
                         think = _extract_tag(raw, _THINK_RE)
@@ -1283,7 +1438,13 @@ def main() -> int:
                                 answer_letter = None
                                 break
 
-                            if summary is None or _is_placeholder(summary) or _contains_banned_example(summary) or (not _summary_has_ohrpu(summary)):
+                            if (
+                                summary is None
+                                or _is_placeholder(summary)
+                                or _contains_banned_example(summary)
+                                or (not _summary_has_ohrpu(summary))
+                                or _summary_has_stale_boilerplate(summary, seen_count=len(seen_frames))
+                            ):
                                 invalid_outputs += 1
                                 terminated_reason = "invalid_answer_summary"
                                 if retry_idx < int(args.max_retries_per_round):
@@ -1334,6 +1495,18 @@ def main() -> int:
                                 )
                                 attempt_user_text = f"{user_text}\n\n{retry_feedback}"
                                 continue
+                        if summary is not None and _summary_has_stale_boilerplate(summary, seen_count=len(seen_frames)):
+                            invalid_outputs += 1
+                            terminated_reason = "stale_select_summary"
+                            if retry_idx < int(args.max_retries_per_round):
+                                total_retries += 1
+                                retry_feedback = _retry_feedback_text(
+                                    "Invalid response: the <summary> claims no frames/captions were seen, but evidence was shown. "
+                                    "Rewrite <summary> to reflect what was observed so far (P/O/H/U/R), then request frames.",
+                                    force_answer=bool(args.force_final_answer and round_idx >= args.max_rounds),
+                                )
+                                attempt_user_text = f"{user_text}\n\n{retry_feedback}"
+                                continue
 
                         if (not bool(args.use_candidate_frame_ids)) and _frames_has_range_syntax(frames_text):
                             invalid_outputs += 1
@@ -1371,12 +1544,19 @@ def main() -> int:
                                     )
                                     attempt_user_text = f"{user_text}\n\n{retry_feedback}"
                                     continue
-                                if args.strict_actions:
-                                    invalid_action_terminated += 1
-                                    terminated_invalid_action = True
-                                    answer_letter = None
-                                    break
-                                requested = []
+                                # Be forgiving: fall back to heuristic sampling instead of hard-terminating.
+                                fallback_frames_used += 1
+                                requested = candidate_next_frames[: args.max_frames_per_round]
+                                if not requested:
+                                    requested = _sample_unseen_frames(
+                                        frame_count, set(seen_frames), args.max_frames_per_round, rng=rng
+                                    )
+                                next_frames = (
+                                    requested[: args.max_frames_per_round]
+                                    if requested
+                                    else _sample_uniform_indices(frame_count, 1)
+                                )
+                                break
                             else:
                                 requested = _dedupe_preserve_order(mapped)
                                 requested = [i for i in requested if 0 <= i < frame_count and i not in seen_frames]
