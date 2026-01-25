@@ -33,6 +33,45 @@ _FRAMES_RE = re.compile(r"<frames>(.*?)</frames>", re.DOTALL | re.IGNORECASE)
 _ANSWER_RE = re.compile(r"<answer>(.*?)</answer>", re.DOTALL | re.IGNORECASE)
 _THINK_RE = re.compile(r"<think>(.*?)</think>", re.DOTALL | re.IGNORECASE)
 
+_CAPTION_CACHE: dict[str, dict[int, str]] = {}
+
+
+def _truncate_text(text: str, max_chars: int) -> str:
+    if max_chars <= 0:
+        return text
+    text = text or ""
+    if len(text) <= max_chars:
+        return text
+    return text[: max_chars].rstrip() + "…"
+
+
+def _load_video_captions(captions_dir: str, video_id: str) -> dict[int, str]:
+    cached = _CAPTION_CACHE.get(video_id)
+    if cached is not None:
+        return cached
+    path = os.path.join(captions_dir, f"{video_id}_cap.json")
+    if not os.path.exists(path):
+        _CAPTION_CACHE[video_id] = {}
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+    except Exception:
+        _CAPTION_CACHE[video_id] = {}
+        return {}
+    captions: dict[int, str] = {}
+    if isinstance(raw, dict):
+        for k, v in raw.items():
+            try:
+                idx = int(k)
+            except Exception:
+                continue
+            if isinstance(v, str):
+                captions[idx] = v.strip()
+    _CAPTION_CACHE[video_id] = captions
+    return captions
+
+
 DEFAULT_SYSTEM_PROMPT = (
     "You are REVISE, a multi-round video reasoning agent.\n"
     "Each round you will see: (1) a multiple-choice question with options, (2) the current belief summary, "
@@ -302,6 +341,8 @@ def _build_user_text(
     candidate_unseen_frames: Optional[list[int]] = None,
     use_candidate_frame_ids: bool = False,
     require_candidate_frames: bool = False,
+    shown_frame_captions: Optional[list[str]] = None,
+    candidate_id_captions: Optional[list[str]] = None,
 ) -> str:
     lines: list[str] = [f"Round {round_idx} / Question:\n{question_block}", f"Total frames L = {frame_count}."]
     if hide_seen_frames:
@@ -320,6 +361,10 @@ def _build_user_text(
         lines.append(
             "In <frames>, output ONLY candidate IDs (comma-separated). Do NOT output raw frame indices when IDs exist."
         )
+        if candidate_id_captions:
+            lines.append("Captions for candidate unseen frame IDs (1fps, may be noisy):")
+            for cid, cap in enumerate(candidate_id_captions, start=1):
+                lines.append(f"ID {cid}: {cap}")
     else:
         lines.append(
             "Allowed unseen frame ranges for <frames> (choose NEW indices only from these ranges): "
@@ -336,7 +381,20 @@ def _build_user_text(
             )
             if require_candidate_frames:
                 lines.append("In <frames>, output ONLY indices within the Candidate unseen frame ranges above.")
-    lines.extend(["Current summary:", f"<summary>{summary}</summary>", "Frames shown in this round:"])
+    lines.extend(["Current summary:", f"<summary>{summary}</summary>"])
+
+    if shown_frame_captions:
+        lines.append("Captions for shown frames (1fps, may be noisy):")
+        use_labels = hide_seen_frames or (candidate_unseen_frames and use_candidate_frame_ids)
+        if use_labels:
+            labels = [chr(ord("A") + i) for i in range(len(frame_indices))]
+            for label, cap in zip(labels, shown_frame_captions, strict=False):
+                lines.append(f"{label}: {cap}")
+        else:
+            for idx, cap in zip(frame_indices, shown_frame_captions, strict=False):
+                lines.append(f"{idx}: {cap}")
+
+    lines.append("Frames shown in this round:")
     if hide_seen_frames or (candidate_unseen_frames and use_candidate_frame_ids):
         # Avoid leaking/copying raw frame indices when the action space is candidate IDs.
         for i, _ in enumerate(frame_indices):
@@ -808,6 +866,24 @@ def main() -> int:
         default=False,
         help="Do not print explicit seen frame indices in the prompt (reduces copying); rely on unseen ranges instead.",
     )
+    parser.add_argument(
+        "--captions-dir",
+        default=None,
+        help="Optional directory containing per-video caption JSON files named <video_id>_cap.json.",
+    )
+    parser.add_argument(
+        "--caption-include",
+        choices=["none", "shown", "candidate", "both"],
+        default="none",
+        help="If --captions-dir is set, include caption text for: "
+        "'shown' frames in the current round, 'candidate' unseen frame IDs, or 'both'.",
+    )
+    parser.add_argument(
+        "--caption-max-chars",
+        type=int,
+        default=200,
+        help="Max characters per caption snippet included in the prompt (0 disables truncation).",
+    )
     parser.add_argument("--temperature", type=float, default=0.2)
     parser.add_argument("--top-p", type=float, default=0.9)
     parser.add_argument("--max-tokens", type=int, default=256)
@@ -873,6 +949,12 @@ def main() -> int:
         args.use_candidate_frames = True
     if bool(getattr(args, "require_candidate_frames", False)):
         args.use_candidate_frames = True
+
+    if getattr(args, "caption_include", "none") != "none":
+        if not getattr(args, "captions_dir", None):
+            raise ValueError("--caption-include requires --captions-dir to be set.")
+        if not os.path.isdir(str(args.captions_dir)):
+            raise ValueError(f"--captions-dir does not exist or is not a directory: {args.captions_dir}")
 
     random.seed(args.seed)
     rng = random.Random(args.seed)
@@ -957,6 +1039,9 @@ def main() -> int:
                 "use_candidate_frames": bool(args.use_candidate_frames),
                 "use_candidate_frame_ids": bool(args.use_candidate_frame_ids),
                 "require_candidate_frames": bool(getattr(args, "require_candidate_frames", False)),
+                "captions_dir": getattr(args, "captions_dir", None),
+                "caption_include": getattr(args, "caption_include", "none"),
+                "caption_max_chars": int(getattr(args, "caption_max_chars", 0)),
                 "strict_actions": bool(args.strict_actions),
                 "force_final_answer": args.force_final_answer,
                 "resume_from_log": args.resume_from_log,
@@ -986,6 +1071,10 @@ def main() -> int:
 
                 question_block = _format_question(sample.question, sample.choices)
                 system_prompt = DEFAULT_SYSTEM_PROMPT.format(max_frames_per_round=args.max_frames_per_round)
+
+                video_captions: dict[int, str] = {}
+                if getattr(args, "captions_dir", None) and getattr(args, "caption_include", "none") != "none":
+                    video_captions = _load_video_captions(str(args.captions_dir), sample.video_id)
 
                 summary_state = (
                     "P: the agent has not seen any frames yet; "
@@ -1025,6 +1114,21 @@ def main() -> int:
                             k=k,
                             rng=rng,
                         )
+                    shown_captions: Optional[list[str]] = None
+                    candidate_captions: Optional[list[str]] = None
+                    if video_captions:
+                        include = getattr(args, "caption_include", "none")
+                        max_chars = int(getattr(args, "caption_max_chars", 0))
+                        if include in ("shown", "both"):
+                            shown_captions = [
+                                _truncate_text(video_captions.get(i) or "[no caption]", max_chars)
+                                for i in frames_this_round
+                            ]
+                        if include in ("candidate", "both") and candidate_next_frames:
+                            candidate_captions = [
+                                _truncate_text(video_captions.get(i) or "[no caption]", max_chars)
+                                for i in candidate_next_frames
+                            ]
                     images = _extract_frames(sample.video_path, frames_this_round)
                     user_text = _build_user_text(
                         question_block=question_block,
@@ -1037,6 +1141,8 @@ def main() -> int:
                         candidate_unseen_frames=candidate_next_frames if getattr(args, "use_candidate_frames", False) else None,
                         use_candidate_frame_ids=bool(args.use_candidate_frame_ids),
                         require_candidate_frames=bool(getattr(args, "require_candidate_frames", False)),
+                        shown_frame_captions=shown_captions,
+                        candidate_id_captions=candidate_captions,
                     )
                     if args.force_final_answer and round_idx >= args.max_rounds:
                         user_text = (
@@ -1098,6 +1204,11 @@ def main() -> int:
                                 "use_candidate_frames": bool(getattr(args, "use_candidate_frames", False)),
                                 "use_candidate_frame_ids": bool(args.use_candidate_frame_ids),
                                 "candidate_unseen_frames": candidate_next_frames if getattr(args, "use_candidate_frames", False) else None,
+                                "captions_dir": getattr(args, "captions_dir", None),
+                                "caption_include": getattr(args, "caption_include", "none"),
+                                "caption_max_chars": int(getattr(args, "caption_max_chars", 0)),
+                                "shown_frame_captions": shown_captions,
+                                "candidate_id_captions": candidate_captions,
                                 "seen_frames": seen_frames,
                                 "current_frames": frames_this_round,
                                 "requested_raw_frames": requested_raw_frames,

@@ -122,6 +122,10 @@ ENV/
 # data
 *.parquet
 
+# NExT-QA captions (local artifact; do not commit)
+nextqa_allcaps_1fps.zip
+data/nextqa_allcaps_1fps/
+
 
 # local logs
 logs
