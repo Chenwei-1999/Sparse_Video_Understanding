@@ -8,7 +8,7 @@ set -euo pipefail
 #   ./scripts/run_nextqa_revise_plus_caption_val_tp1.sh
 #
 # Environment overrides:
-#   SESSION=nextqa_revise_plus_caption_val_tp1
+#   SESSION=nextqa_revise_plus_caption_val_tp1_ts
 #   DATE=2026-01-25
 #   PY=/shares/hlw3876/chenwei/miniconda3/envs/verlrun/bin/python
 #   MODEL_PATH=...
@@ -23,7 +23,7 @@ cd /home/cxk2993/verl
 export PYTHONUNBUFFERED=1
 export WANDB_MODE="${WANDB_MODE:-online}"
 
-SESSION="${SESSION:-nextqa_revise_plus_caption_val_tp1}"
+SESSION="${SESSION:-nextqa_revise_plus_caption_val_tp1_ts}"
 DATE="${DATE:-$(date +%F)}"
 
 PY="${PY:-/shares/hlw3876/chenwei/miniconda3/envs/verlrun/bin/python}"
@@ -34,7 +34,7 @@ MAP_JSON="${MAP_JSON:-/shares/hlw3876/chenwei/NExT-QA/map_vid_vidorID.json}"
 CSV="${CSV:-/shares/hlw3876/chenwei/NExT-QA/nextqa/val.csv}"
 CAPTIONS_DIR="${CAPTIONS_DIR:-data/nextqa_allcaps_1fps}"
 
-OUT_DIR="${OUT_DIR:-outputs/${DATE}/nextqa_caption_compare_qwen2p5vl7b/revise_plus_caption_val_tp1}"
+OUT_DIR="${OUT_DIR:-outputs/${DATE}/nextqa_caption_compare_qwen2p5vl7b/revise_plus_caption_val_tp1_ts}"
 mkdir -p "${OUT_DIR}"
 
 MAX_ROUNDS="${MAX_ROUNDS:-5}"
@@ -97,4 +97,3 @@ tmux new-window -t "${SESSION}" -n shard2 "bash -lc \"${cmd2}\""
 tmux new-window -t "${SESSION}" -n shard3 "bash -lc \"${cmd3}\""
 
 echo "[tmux] started ${SESSION} (4 windows)."
-

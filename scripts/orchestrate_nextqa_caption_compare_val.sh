@@ -21,7 +21,7 @@ DATE="${DATE:-$(date +%F)}"
 export DATE
 
 CAPTION_REVISE_DIR="outputs/2026-01-25/nextqa_caption_compare_qwen2p5vl7b/caption_revise_val_tp1_ts"
-REVISE_PLUS_CAPTION_DIR="outputs/${DATE}/nextqa_caption_compare_qwen2p5vl7b/revise_plus_caption_val_tp1"
+REVISE_PLUS_CAPTION_DIR="outputs/${DATE}/nextqa_caption_compare_qwen2p5vl7b/revise_plus_caption_val_tp1_ts"
 VIDEOAGENT_DIR="outputs/${DATE}/nextqa_caption_compare_qwen2p5vl7b/videoagent_caption_val_tp1"
 
 wait_for_summaries() {
@@ -80,4 +80,3 @@ echo "[orchestrate] merged:"
 echo "- ${CAPTION_REVISE_DIR}/merged.json"
 echo "- ${REVISE_PLUS_CAPTION_DIR}/merged.json"
 echo "- ${VIDEOAGENT_DIR}/merged.json"
-
