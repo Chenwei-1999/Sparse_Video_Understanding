@@ -430,6 +430,8 @@ def _build_user_text(
     require_candidate_frames: bool = False,
     shown_frame_captions: Optional[list[str]] = None,
     candidate_id_captions: Optional[list[str]] = None,
+    shown_frame_ts: Optional[list[int]] = None,
+    candidate_id_ts: Optional[list[int]] = None,
 ) -> str:
     lines: list[str] = [f"Round {round_idx} / Question:\n{question_block}", f"Total frames L = {frame_count}."]
     if hide_seen_frames:
@@ -451,7 +453,10 @@ def _build_user_text(
         if candidate_id_captions:
             lines.append("Captions for candidate unseen frame IDs (1fps, may be noisy):")
             for cid, cap in enumerate(candidate_id_captions, start=1):
-                lines.append(f"ID {cid}: {cap}")
+                if candidate_id_ts and (cid - 1) < len(candidate_id_ts):
+                    lines.append(f"ID {cid} (t≈{int(candidate_id_ts[cid - 1])}s): {cap}")
+                else:
+                    lines.append(f"ID {cid}: {cap}")
     else:
         lines.append(
             "Allowed unseen frame ranges for <frames> (choose NEW indices only from these ranges): "
@@ -479,6 +484,9 @@ def _build_user_text(
         if not render_images:
             for idx, cap in zip(frame_indices, shown_frame_captions, strict=False):
                 lines.append(f"{int(idx)}s: {cap}")
+        elif shown_frame_ts:
+            for ts, cap in zip(shown_frame_ts, shown_frame_captions, strict=False):
+                lines.append(f"{int(ts)}s: {cap}")
         else:
             use_labels = hide_seen_frames or (candidate_unseen_frames and use_candidate_frame_ids)
             if use_labels:
@@ -491,7 +499,10 @@ def _build_user_text(
 
     if render_images:
         lines.append("Frames shown in this round:")
-        if hide_seen_frames or (candidate_unseen_frames and use_candidate_frame_ids):
+        if shown_frame_ts:
+            for ts in shown_frame_ts[: len(frame_indices)]:
+                lines.append(f"Shown frame at t≈{int(ts)}s <image>")
+        elif hide_seen_frames or (candidate_unseen_frames and use_candidate_frame_ids):
             # Avoid leaking/copying raw frame indices when the action space is candidate IDs.
             for i, _ in enumerate(frame_indices):
                 label = chr(ord("A") + i)
@@ -1272,6 +1283,8 @@ def main() -> int:
                         )
                     shown_captions: Optional[list[str]] = None
                     candidate_captions: Optional[list[str]] = None
+                    shown_ts: Optional[list[int]] = None
+                    candidate_ts: Optional[list[int]] = None
                     if video_captions:
                         include = getattr(args, "caption_include", "none")
                         max_chars = int(getattr(args, "caption_max_chars", 0))
@@ -1280,11 +1293,15 @@ def main() -> int:
                                 _truncate_text(_caption_for_index(int(i)), max_chars)
                                 for i in frames_this_round
                             ]
+                            if observation_mode != "caption":
+                                shown_ts = [_caption_key_for_frame_index(int(i), fps) for i in frames_this_round]
                         if include in ("candidate", "both") and candidate_next_frames:
                             candidate_captions = [
                                 _truncate_text(_caption_for_index(int(i)), max_chars)
                                 for i in candidate_next_frames
                             ]
+                            if observation_mode != "caption":
+                                candidate_ts = [_caption_key_for_frame_index(int(i), fps) for i in candidate_next_frames]
                     images: list[Image.Image] = []
                     if observation_mode != "caption":
                         images = _extract_frames(sample.video_path, frames_this_round)
@@ -1302,6 +1319,8 @@ def main() -> int:
                         require_candidate_frames=bool(getattr(args, "require_candidate_frames", False)),
                         shown_frame_captions=shown_captions,
                         candidate_id_captions=candidate_captions,
+                        shown_frame_ts=shown_ts,
+                        candidate_id_ts=candidate_ts,
                     )
                     if args.force_final_answer and round_idx >= args.max_rounds:
                         user_text = (
