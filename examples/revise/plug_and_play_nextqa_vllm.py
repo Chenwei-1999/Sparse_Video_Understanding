@@ -471,7 +471,11 @@ def _build_user_text(
     lines.extend(["Current summary:", f"<summary>{summary}</summary>"])
 
     if shown_frame_captions:
-        lines.append("Captions for shown frames (1fps, may be noisy):")
+        lines.append(
+            "Captions for shown frames (1fps, may be noisy):"
+            if render_images
+            else "Captions shown in this round (1fps, index≈seconds; may be noisy):"
+        )
         use_labels = hide_seen_frames or (candidate_unseen_frames and use_candidate_frame_ids)
         if use_labels:
             labels = [chr(ord("A") + i) for i in range(len(frame_indices))]
@@ -481,8 +485,8 @@ def _build_user_text(
             for idx, cap in zip(frame_indices, shown_frame_captions, strict=False):
                 lines.append(f"{idx}: {cap}")
 
-    lines.append("Frames shown in this round:")
     if render_images:
+        lines.append("Frames shown in this round:")
         if hide_seen_frames or (candidate_unseen_frames and use_candidate_frame_ids):
             # Avoid leaking/copying raw frame indices when the action space is candidate IDs.
             for i, _ in enumerate(frame_indices):
@@ -492,14 +496,17 @@ def _build_user_text(
             for idx in frame_indices:
                 lines.append(f"Frame {idx} <image>")
     else:
-        # Caption-only / text-only mode: do not include "<image>" placeholders.
-        if hide_seen_frames or (candidate_unseen_frames and use_candidate_frame_ids):
-            for i, _ in enumerate(frame_indices):
-                label = chr(ord("A") + i)
-                lines.append(f"Shown frame {label}")
-        else:
-            for idx in frame_indices:
-                lines.append(f"Frame {idx}")
+        # Caption-only / text-only mode: captions above are the actual observation;
+        # avoid redundant "Shown frame A/B/..." lines unless no captions were provided.
+        if not shown_frame_captions:
+            lines.append("Caption indices shown in this round:")
+            if hide_seen_frames or (candidate_unseen_frames and use_candidate_frame_ids):
+                for i, _ in enumerate(frame_indices):
+                    label = chr(ord("A") + i)
+                    lines.append(f"Shown {label}")
+            else:
+                for idx in frame_indices:
+                    lines.append(str(idx))
     return "\n".join(lines)
 
 
