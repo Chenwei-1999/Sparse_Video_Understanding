@@ -476,14 +476,18 @@ def _build_user_text(
             if render_images
             else "Captions shown in this round (1fps, index≈seconds; may be noisy):"
         )
-        use_labels = hide_seen_frames or (candidate_unseen_frames and use_candidate_frame_ids)
-        if use_labels:
-            labels = [chr(ord("A") + i) for i in range(len(frame_indices))]
-            for label, cap in zip(labels, shown_frame_captions, strict=False):
-                lines.append(f"{label}: {cap}")
-        else:
+        if not render_images:
             for idx, cap in zip(frame_indices, shown_frame_captions, strict=False):
-                lines.append(f"{idx}: {cap}")
+                lines.append(f"{int(idx)}s: {cap}")
+        else:
+            use_labels = hide_seen_frames or (candidate_unseen_frames and use_candidate_frame_ids)
+            if use_labels:
+                labels = [chr(ord("A") + i) for i in range(len(frame_indices))]
+                for label, cap in zip(labels, shown_frame_captions, strict=False):
+                    lines.append(f"{label}: {cap}")
+            else:
+                for idx, cap in zip(frame_indices, shown_frame_captions, strict=False):
+                    lines.append(f"{idx}: {cap}")
 
     if render_images:
         lines.append("Frames shown in this round:")
