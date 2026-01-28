@@ -193,48 +193,58 @@ done
 echo "[ablation] all configs finished at $(date)"
 
 # Write a short markdown summary.
-REPORT_PATH="reports/nextqa_budget_ablation_qwen2p5vl7b.md"
+REPORT_PATH="${REPORT_PATH:-reports/nextqa_budget_ablation_qwen2p5vl7b.md}"
+export REPORT_PATH OUT_BASE TOTAL_BUDGET_FRAMES MAX_SAMPLES SEED
 export CONFIG_SPECS="$(printf '%s\n' "${configs[@]}")"
-${PY} - <<PY
+${PY} - <<'PY'
 import json
 import os
 from pathlib import Path
 
-out_base = Path("${OUT_BASE}")
+out_base = Path(os.environ["OUT_BASE"])
+report_path = Path(os.environ["REPORT_PATH"])
+total_budget_frames = int(os.environ.get("TOTAL_BUDGET_FRAMES", "0"))
+max_samples = int(os.environ.get("MAX_SAMPLES", "0"))
+seed = int(os.environ.get("SEED", "0"))
+
 specs = [s for s in os.environ.get("CONFIG_SPECS", "").splitlines() if s.strip()]
 rows = []
 for spec in specs:
-    name, r, f = spec.split(":")
-    merged = out_base / f"{name}_R{r}_F{f}_B${TOTAL_BUDGET_FRAMES}" / "merged.json"
+    name, rounds, frames = spec.split(":")
+    merged = out_base / f"{name}_R{rounds}_F{frames}_B{total_budget_frames}" / "merged.json"
     d = json.load(open(merged))
     m = d["merged_results"]
-    rows.append({
-        "name": name,
-        "rounds": int(r),
-        "frames": int(f),
-        "acc": m.get("accuracy"),
-        "avg_rounds": m.get("avg_rounds"),
-        "avg_frames_used": m.get("avg_frames_used"),
-        "calls": m.get("total_model_calls"),
-        "prompt_bytes": m.get("prompt_log_bytes"),
-        "merged": str(merged),
-    })
+    rows.append(
+        {
+            "name": name,
+            "rounds": int(rounds),
+            "frames": int(frames),
+            "acc": float(m.get("accuracy", 0.0)),
+            "avg_rounds": float(m.get("avg_rounds", 0.0)),
+            "avg_frames_used": float(m.get("avg_frames_used", 0.0)),
+            "calls": int(m.get("total_model_calls", 0)),
+            "prompt_bytes": int(m.get("prompt_log_bytes", 0)),
+            "merged": str(merged),
+        }
+    )
 
 lines = []
 lines.append("# NExT-QA budget ablation (Qwen2.5-VL-7B)")
 lines.append("")
-lines.append(f"- Fixed total frame budget: **{int(${TOTAL_BUDGET_FRAMES})}** (= max_rounds × max_frames_per_round)")
+lines.append(f"- Fixed total frame budget: **{total_budget_frames}** (= max_rounds × max_frames_per_round)")
+lines.append(f"- Subset: max_samples={max_samples} seed={seed}")
 lines.append("- Policy: REVISE plug-and-play (frames), candidate IDs, answer only in final round.")
 lines.append("")
 lines.append("| Setting | max_rounds | max_frames/round | Accuracy | avg_rounds | avg_frames_used | total_calls | prompt_log_bytes | Artifacts |")
 lines.append("|---|---:|---:|---:|---:|---:|---:|---:|---|")
 for r in rows:
     lines.append(
-        f"| {r['name']} | {r['rounds']} | {r['frames']} | {r['acc']:.4f} | {r['avg_rounds']:.3f} | {r['avg_frames_used']:.2f} | {r['calls']} | {r['prompt_bytes']} | `{r['merged']}` |"
+        f\"| {r['name']} | {r['rounds']} | {r['frames']} | {r['acc']:.4f} | {r['avg_rounds']:.3f} | {r['avg_frames_used']:.2f} | {r['calls']} | {r['prompt_bytes']} | `{r['merged']}` |\"
     )
 
-Path("${REPORT_PATH}").write_text("\\n".join(lines) + "\\n")
-print(f\"Wrote {REPORT_PATH}\")
+report_path.parent.mkdir(parents=True, exist_ok=True)
+report_path.write_text(\"\\n\".join(lines) + \"\\n\", encoding=\"utf-8\")
+print(f\"Wrote {report_path}\")
 PY
 
 echo "[ablation] report: ${REPORT_PATH}"

@@ -1045,6 +1045,13 @@ def main() -> int:
         default=True,
         help="Terminate the sample immediately on illegal actions (e.g., invalid <frames>, missing required tags, <think>); format issues like invalid <summary> do not terminate.",
     )
+    parser.add_argument(
+        "--fallback-on-invalid-candidate-ids",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="When using candidate frame IDs, fall back to heuristic sampling if the model outputs out-of-range IDs. "
+        "Disable to make out-of-range candidate IDs count as an illegal action (and terminate when --strict-actions is enabled).",
+    )
     parser.add_argument("--log-jsonl", default=os.getenv("REVISE_LOG_PATH", "debug_prompt_logs/revise_samples.jsonl"))
     parser.add_argument("--summary-json", default=None, help="Optional path to save a run summary JSON.")
     parser.add_argument("--progress-interval", type=int, default=10)
@@ -1609,6 +1616,11 @@ def main() -> int:
                                     )
                                     attempt_user_text = f"{user_text}\n\n{retry_feedback}"
                                     continue
+                                if args.strict_actions and not bool(args.fallback_on_invalid_candidate_ids):
+                                    invalid_action_terminated += 1
+                                    terminated_invalid_action = True
+                                    answer_letter = None
+                                    break
                                 # Be forgiving: fall back to heuristic sampling instead of hard-terminating.
                                 fallback_frames_used += 1
                                 requested = candidate_next_frames[: args.max_frames_per_round]
@@ -1889,6 +1901,7 @@ def main() -> int:
                         "max_model_len": args.max_model_len,
                         "gpu_memory_utilization": args.gpu_memory_utilization,
                         "max_samples": args.max_samples,
+                        "seed": int(getattr(args, "seed", 0)),
                         "num_shards": int(getattr(args, "num_shards", 1)),
                         "shard_idx": int(getattr(args, "shard_idx", 0)),
                         "max_rounds": args.max_rounds,
@@ -1900,6 +1913,8 @@ def main() -> int:
                         "use_candidate_frames": bool(args.use_candidate_frames),
                         "use_candidate_frame_ids": bool(args.use_candidate_frame_ids),
                         "require_candidate_frames": bool(getattr(args, "require_candidate_frames", False)),
+                        "strict_actions": bool(args.strict_actions),
+                        "fallback_on_invalid_candidate_ids": bool(args.fallback_on_invalid_candidate_ids),
                         "answer_only_final_round": bool(args.answer_only_final_round),
                         "results": results,
                         "prompt_log_jsonl": args.log_jsonl,

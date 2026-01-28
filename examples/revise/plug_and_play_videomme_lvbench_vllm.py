@@ -44,14 +44,13 @@ DEFAULT_SYSTEM_PROMPT_WITH_THINK = (
     "If you are NOT confident, request MORE video frames to view NEXT.\n"
     "Frames are sampled at 1 fps; frame index ≈ timestamp in seconds.\n\n"
     "IMPORTANT: Output must follow EXACTLY ONE of the two formats below. Do not output any text outside tags.\n"
-    "Output <think> then <summary> plus either <frames> (request) OR <answer> (final).\n"
+    "You MAY optionally include a <think>...</think> block, but it is NOT required.\n"
+    "Always include <summary> plus either <frames> (request) OR <answer> (final).\n"
     "Do NOT output any other tags.\n\n"
     "Format 1 — Request more frames (use this only if NOT confident):\n"
-    "<think>short reasoning based on shown frames; no final answer letter</think>\n"
     "<summary>P: ...; O: ...; H: ...; U: ...; R: request additional frames</summary>\n"
     "<frames>1, 3</frames>\n\n"
     "Format 2 — Answer now (use this if confident):\n"
-    "<think>short reasoning based on shown frames; no extra text</think>\n"
     "<summary>P: ...; O: ...; H: ...; U: ...; R: answered</summary>\n"
     "<answer>B</answer>\n\n"
     "Tag meanings:\n"
@@ -151,7 +150,8 @@ def _parse_time_reference_range(time_reference: str, timeline_len: int) -> Optio
 def _b64_jpeg(img: Image.Image) -> str:
     # Qwen2.5-VL can exceed `max_model_len` when fed high-resolution frames (image token count depends on
     # resolution/aspect ratio). Downscale to keep prompts within budget while still using real frames.
-    max_edge = 512
+    # Use a conservative max edge to reduce multimodal token count for multi-round evaluation.
+    max_edge = 384
     try:
         if img.mode != "RGB":
             img = img.convert("RGB")
@@ -288,12 +288,22 @@ def _port_is_open(host: str, port: int) -> bool:
 
 
 def _wait_for_server(host: str, port: int, timeout_s: int) -> None:
+    """Wait until the vLLM OpenAI server is actually ready.
+
+    vLLM can open the TCP port before the model is fully initialized; issuing a chat request too early can
+    return transient HTTP 400/503 errors. We poll the `/v1/models` endpoint to ensure readiness.
+    """
+    base_url = f"http://{host}:{port}"
     start = time.time()
     while time.time() - start < timeout_s:
-        if _port_is_open(host, port):
-            return
+        try:
+            resp = requests.get(f"{base_url}/v1/models", timeout=1.0)
+            if resp.status_code == 200:
+                return
+        except Exception:
+            pass
         time.sleep(0.5)
-    raise TimeoutError(f"vLLM server did not open {host}:{port} within {timeout_s}s")
+    raise TimeoutError(f"vLLM server did not become ready at {host}:{port} within {timeout_s}s")
 
 
 def _start_vllm_server(args: argparse.Namespace) -> subprocess.Popen[str]:
@@ -679,6 +689,20 @@ def _build_user_text(
     time_reference: str = "",
 ) -> str:
     letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+    def _idx_to_letters(idx: int) -> str:
+        # Excel-style column labels: 0->A, 25->Z, 26->AA, ...
+        if idx < 0:
+            return "?"
+        base = len(letters)
+        n = idx + 1
+        out = ""
+        while n > 0:
+            n -= 1
+            n, rem = divmod(n, base)
+            out = letters[rem] + out
+        return out
+
     allowed_letters = ", ".join(list(letters[: max(1, question_block.count("\n") - 1)]))  # heuristic
 
     lines: list[str] = []
@@ -706,7 +730,7 @@ def _build_user_text(
             lines.append("IMPORTANT: You MUST choose frames only from the Candidate IDs.")
     lines.extend(["Current summary:", f"<summary>{summary}</summary>", "Frames shown in this round:"])
     for i in range(len(current_frames)):
-        lines.append(f"Shown frame {letters[i]} <image>")
+        lines.append(f"Shown frame {_idx_to_letters(i)} <image>")
     return "\n".join(lines)
 
 
@@ -716,6 +740,8 @@ def main() -> None:
     ap.add_argument("--split", default="")
     ap.add_argument("--video-cache-dir", default="/tmp/chenwei_video_cache")
     ap.add_argument("--max-samples", type=int, default=0)
+    ap.add_argument("--start-idx", type=int, default=0)
+    ap.add_argument("--end-idx", type=int, default=0)
 
     ap.add_argument("--model-path", required=True)
     ap.add_argument("--host", default="127.0.0.1")
@@ -756,6 +782,11 @@ def main() -> None:
     ap.add_argument("--wandb-mode", default=os.getenv("WANDB_MODE", ""))
 
     ap.add_argument("--yt-dlp-timeout-s", type=int, default=600)
+    ap.add_argument(
+        "--cached-only",
+        action="store_true",
+        help="Only evaluate samples whose videos already exist in --video-cache-dir (skip downloads).",
+    )
 
     args = ap.parse_args()
 
@@ -770,6 +801,22 @@ def main() -> None:
         samples = _load_videomme_samples(split)
     else:
         samples = _load_lvbench_samples(split)
+
+    if args.cached_only:
+        cache_dir = Path(args.video_cache_dir) / args.dataset
+        filtered: list[MCVideoSample] = []
+        for s in samples:
+            video_path = cache_dir / s.video_key
+            if video_path.exists() and video_path.stat().st_size > 0:
+                filtered.append(s)
+        samples = filtered
+
+    start_idx = max(0, int(args.start_idx or 0))
+    end_idx = int(args.end_idx or 0)
+    if end_idx <= 0:
+        end_idx = len(samples)
+    if start_idx > 0 or end_idx < len(samples):
+        samples = samples[start_idx:end_idx]
 
     if args.max_samples > 0:
         samples = samples[: args.max_samples]
@@ -805,6 +852,10 @@ def main() -> None:
     total_retries = 0
     total_effective_rounds = 0
     think_present = 0
+    missing_summary = 0
+    answered = 0
+    total_frames_used_all = 0
+    total_frames_used_answered = 0
 
     if args.resume_from_log and args.log_jsonl and os.path.exists(args.log_jsonl):
         # Cheap resume heuristic: count answered samples in log.
@@ -869,6 +920,7 @@ def main() -> None:
     def _process_one(sample: MCVideoSample) -> None:
         nonlocal correct, total_rounds, invalid_outputs, invalid_action_terminated, failed
         nonlocal total_model_calls, total_retries, total_effective_rounds, think_present
+        nonlocal missing_summary, answered, total_frames_used_all, total_frames_used_answered
         nonlocal server_proc
 
         cache_dir = Path(args.video_cache_dir) / sample.dataset
@@ -1071,36 +1123,66 @@ def main() -> None:
                 if think is not None:
                     think_present += 1
 
-                summary = _extract_tag(raw_output, _SUMMARY_RE)
+                summary_out = _extract_tag(raw_output, _SUMMARY_RE)
                 frames_text = _extract_tag(raw_output, _FRAMES_RE)
-                answer = _extract_tag(raw_output, _ANSWER_RE)
+                answer_tag = _extract_tag(raw_output, _ANSWER_RE)
 
-                if summary is None:
-                    retry_feedback = "Invalid response: missing <summary> tag."
-                    invalid_outputs += 1
-                    total_retries += 1
-                    continue
+                if summary_out is None:
+                    # Some models may omit <summary>. Keep previous summary state and proceed if we can still parse
+                    # an answer or a frame request; log this for diagnostics.
+                    missing_summary += 1
+                    summary_out = summary_state
 
-                if answer is not None:
-                    letter = _normalize_answer_letter(answer, len(sample.options))
-                    if letter is None:
+                # Prefer <answer> tag; otherwise attempt to parse from text AFTER </summary> to avoid
+                # accidentally grabbing "P/O/H/U/R" from the summary.
+                answer_candidate_text = answer_tag
+                if answer_candidate_text is None:
+                    tail = raw_output or ""
+                    try:
+                        m_end = None
+                        for m in re.finditer(r"</summary>", raw_output or "", flags=re.IGNORECASE):
+                            m_end = m.end()
+                        if m_end is not None:
+                            tail = (raw_output or "")[m_end:]
+                    except Exception:
+                        tail = raw_output or ""
+                    tail = _collapse_ws(tail)
+                    if 0 < len(tail) <= 32:
+                        toks = tail.split()
+                        answer_candidate_text = toks[-1] if toks else tail
+
+                if answer_candidate_text is not None:
+                    letter = _normalize_answer_letter(answer_candidate_text, len(sample.options))
+                    if letter is not None:
+                        answer_letter = letter
+                        summary_state = summary_out
+                        break
+                    if answer_tag is not None:
                         retry_feedback = "Invalid response: <answer> must be a single option letter."
                         invalid_outputs += 1
                         total_retries += 1
                         continue
-                    answer_letter = letter
-                    summary_state = summary
-                    break
-
-                if frames_text is None:
-                    retry_feedback = "Invalid response: missing <frames> tag for requesting more frames."
-                    invalid_outputs += 1
-                    total_retries += 1
-                    continue
 
                 requested = _dedupe_preserve_order(_parse_int_list(frames_text))
                 if not requested:
-                    retry_feedback = "Invalid response: <frames> must contain at least one integer."
+                    if frames_text is None:
+                        # Recover if the model output candidate IDs but forgot the <frames> tag.
+                        tail = raw_output or ""
+                        try:
+                            m_end = None
+                            for m in re.finditer(r"</summary>", raw_output or "", flags=re.IGNORECASE):
+                                m_end = m.end()
+                            if m_end is not None:
+                                tail = (raw_output or "")[m_end:]
+                        except Exception:
+                            tail = raw_output or ""
+                        requested = _dedupe_preserve_order(_parse_int_list(tail))
+
+                if not requested:
+                    retry_feedback = (
+                        "Invalid response: provide either <answer>LETTER</answer> OR <frames>id1,id2</frames> "
+                        "after the <summary>."
+                    )
                     invalid_outputs += 1
                     total_retries += 1
                     continue
@@ -1142,7 +1224,7 @@ def main() -> None:
                     next_frames = candidate_next_frames[: args.max_frames_per_round]
                     invalid_outputs += 1
 
-                summary_state = summary
+                summary_state = summary_out
                 break
 
             _maybe_log_jsonl(
@@ -1172,6 +1254,10 @@ def main() -> None:
             )
 
             if answer_letter is not None:
+                frames_used = len(seen_frames)
+                total_frames_used_all += frames_used
+                total_frames_used_answered += frames_used
+                answered += 1
                 total_rounds += round_idx
                 total_effective_rounds += effective_rounds
                 gt = _normalize_answer_letter(sample.answer_letter, len(sample.options))
@@ -1222,6 +1308,10 @@ def main() -> None:
             letter = _normalize_answer_letter(ans or "", len(sample.options))
             if letter is not None:
                 answer_letter = letter
+                frames_used = len(seen_frames)
+                total_frames_used_all += frames_used
+                total_frames_used_answered += frames_used
+                answered += 1
                 total_rounds += args.max_rounds
                 total_effective_rounds += effective_rounds
                 gt = _normalize_answer_letter(sample.answer_letter, len(sample.options))
@@ -1232,6 +1322,7 @@ def main() -> None:
 
         if terminated_invalid:
             invalid_action_terminated += 1
+            total_frames_used_all += len(seen_frames)
 
     processed = 0
     for sample in samples:
@@ -1240,8 +1331,9 @@ def main() -> None:
         if processed % 20 == 0:
             acc = correct / max(1, processed)
             avg_rounds = total_rounds / max(1, processed)
+            avg_frames = total_frames_used_answered / max(1, answered)
             print(
-                f"[{processed}/{len(samples)}] acc={acc:.4f} avg_rounds={avg_rounds:.3f} "
+                f"[{processed}/{len(samples)}] acc={acc:.4f} avg_rounds={avg_rounds:.3f} avg_frames={avg_frames:.2f} "
                 f"failed={failed} invalid_term={invalid_action_terminated} calls={total_model_calls} "
                 f"elapsed_s={time.time()-start_t:.1f}",
                 flush=True,
@@ -1251,11 +1343,13 @@ def main() -> None:
                 {
                     "eval/acc": acc,
                     "eval/avg_rounds": avg_rounds,
+                    "eval/avg_frames_used": avg_frames,
                     "eval/failed": failed,
                     "eval/invalid_action_terminated": invalid_action_terminated,
                     "eval/invalid_outputs": invalid_outputs,
                     "eval/total_calls": total_model_calls,
                     "eval/think_present": think_present,
+                    "eval/missing_summary": missing_summary,
                 },
                 step=processed,
             )
@@ -1264,6 +1358,8 @@ def main() -> None:
     acc = correct / max(1, processed)
     avg_rounds = total_rounds / max(1, processed)
     avg_effective_rounds = total_effective_rounds / max(1, processed)
+    avg_frames_used = total_frames_used_answered / max(1, answered)
+    avg_frames_used_all = total_frames_used_all / max(1, processed)
     prompt_log_lines = 0
     prompt_log_bytes = 0
     if args.log_jsonl and os.path.exists(args.log_jsonl):
@@ -1273,10 +1369,13 @@ def main() -> None:
 
     results = {
         "samples": processed,
+        "answered": answered,
         "correct": correct,
         "accuracy": acc,
         "avg_rounds": avg_rounds,
         "avg_effective_rounds": avg_effective_rounds,
+        "avg_frames_used": avg_frames_used,
+        "avg_frames_used_all": avg_frames_used_all,
         "failed": failed,
         "elapsed_s": elapsed,
         "prompt_log_lines": prompt_log_lines,
@@ -1286,14 +1385,18 @@ def main() -> None:
         "total_retries": total_retries,
         "total_model_calls": total_model_calls,
         "think_present_rounds": think_present,
+        "missing_summary_rounds": missing_summary,
     }
     print(json.dumps(results, indent=2), flush=True)
 
     wandb_info: Optional[dict[str, Any]] = None
     if run is not None:
+        run.summary["answered"] = answered
         run.summary["final_acc"] = acc
         run.summary["final_avg_rounds"] = avg_rounds
         run.summary["final_avg_effective_rounds"] = avg_effective_rounds
+        run.summary["final_avg_frames_used"] = avg_frames_used
+        run.summary["final_avg_frames_used_all"] = avg_frames_used_all
         run.summary["failed"] = failed
         run.summary["invalid_outputs"] = invalid_outputs
         run.summary["invalid_action_terminated"] = invalid_action_terminated
@@ -1301,6 +1404,7 @@ def main() -> None:
         run.summary["prompt_log_lines"] = prompt_log_lines
         run.summary["prompt_log_bytes"] = prompt_log_bytes
         run.summary["think_present_rounds"] = think_present
+        run.summary["missing_summary_rounds"] = missing_summary
         run.finish()
         wandb_info = {
             "enabled": True,

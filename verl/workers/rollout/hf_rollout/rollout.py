@@ -31,7 +31,7 @@ from verl import DataProto
 from verl.utils.device import get_device_name, get_torch_device
 from verl.utils.torch_functional import get_response_mask
 
-from .base import BaseRollout
+from ..base import BaseRollout
 
 __all__ = ["HFRollout"]
 
@@ -175,3 +175,4 @@ class HFRollout(BaseRollout):
 
         self.module.train()
         return DataProto(batch=batch)
+

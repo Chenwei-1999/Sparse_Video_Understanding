@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import random
 import re
@@ -298,6 +299,30 @@ def _load_video_meta(video_path: str) -> tuple[Optional[int], Optional[float]]:
         return None, None
 
 
+def _timeline_len_1fps(total_frames: int, fps: float) -> int:
+    """Convert raw (num_frames, fps) into a 1fps timeline length (seconds)."""
+    if int(total_frames or 0) <= 0:
+        return 0
+    fps = float(fps or 0.0)
+    if fps <= 0:
+        fps = 30.0
+    duration_s = float(total_frames) / fps
+    return max(1, int(math.ceil(duration_s)))
+
+
+def _timeline_to_frame_idx(timeline_idx: int, fps: float, total_frames: int) -> int:
+    """Map 1fps timeline index (seconds) -> raw frame index for decoding."""
+    total_frames = int(total_frames or 0)
+    if total_frames <= 0:
+        return 0
+    fps = float(fps or 0.0)
+    if fps <= 0:
+        fps = 30.0
+    t = max(0.0, float(timeline_idx))
+    idx = int(t * fps)
+    return max(0, min(idx, total_frames - 1))
+
+
 def _extract_frames(video_path: str, frame_indices: list[int]) -> tuple[list[Image.Image], Optional[float]]:
     if not frame_indices:
         return [], None
@@ -354,13 +379,20 @@ def _build_user_content(
     candidate_unseen_frames: Optional[list[int]] = None,
     use_candidate_frame_ids: bool = False,
     require_candidate_frames: bool = False,
+    use_1fps_timeline: bool = False,
+    time_reference: str = "",
 ) -> str:
     if question_block:
         header = f"Round {round_idx} / Question:\n{question_block}"
     else:
         header = f"Round {round_idx} (same question/options as Round 1)."
 
-    lines: list[str] = [header, f"Total frames L = {frame_count}."]
+    if use_1fps_timeline:
+        lines: list[str] = [header, f"Total frames L = {frame_count} (1 fps timeline)."]
+    else:
+        lines = [header, f"Total frames L = {frame_count}."]
+    if time_reference:
+        lines.append(f"Relevant time window for this question: {time_reference} (focus on this segment).")
     if hide_seen_frames:
         lines.append(
             f"Seen frames: {len(seen_frames)} frames already viewed "
@@ -468,6 +500,7 @@ class ReviseAgentLoop(AgentLoopBase):
         self.candidate_frames_in_prompt_k = int(revise_cfg.get("candidate_frames_in_prompt_k", 12))
         self.use_candidate_frame_ids = bool(revise_cfg.get("use_candidate_frame_ids", False))
         self.require_candidate_frames = bool(revise_cfg.get("require_candidate_frames", False))
+        self.use_1fps_timeline = bool(revise_cfg.get("use_1fps_timeline", False))
         self.seed = int(revise_cfg.get("seed", 0))
 
         # Optional EAGER-style margin scoring (for dense, annotation-free rewards).
@@ -484,14 +517,47 @@ class ReviseAgentLoop(AgentLoopBase):
         choices = extra_info.get("choices", [])
         video_path = extra_info.get("video_path")
         frame_count = int(extra_info.get("frame_count", 0))
+        time_reference = str(extra_info.get("time_reference") or "").strip()
 
         if not video_path:
             raise ValueError("extra_info.video_path is required for ReviseAgentLoop")
 
-        # If frame count missing, try to load from video metadata
-        if frame_count <= 0:
-            frame_count, _ = _load_video_meta(video_path)
-            frame_count = int(frame_count or 0)
+        total_frames: Optional[int] = None
+        video_fps: Optional[float] = None
+
+        if self.use_1fps_timeline:
+            # Action indices are seconds on a 1-fps timeline; map to raw video frames for decoding.
+            total_frames, video_fps = _load_video_meta(video_path)
+            try:
+                total_frames = int(total_frames or 0)
+            except Exception:
+                total_frames = 0
+            try:
+                video_fps = float(video_fps or 0.0)
+            except Exception:
+                video_fps = 0.0
+            if video_fps <= 0:
+                video_fps = 30.0
+            if frame_count <= 0:
+                frame_count = _timeline_len_1fps(int(total_frames or 0), float(video_fps or 0.0))
+        else:
+            # If frame count missing, try to load from video metadata.
+            if frame_count <= 0:
+                frame_count, video_fps = _load_video_meta(video_path)
+                frame_count = int(frame_count or 0)
+
+        def _extract_action_frames(indices: list[int]) -> tuple[list[Image.Image], Optional[float]]:
+            if not indices:
+                return [], video_fps
+            if not self.use_1fps_timeline:
+                return _extract_frames(video_path, indices)
+            tf = int(total_frames or 0)
+            fps = float(video_fps or 0.0)
+            if tf <= 0:
+                return _extract_frames(video_path, indices)
+            mapped = [_timeline_to_frame_idx(i, fps, tf) for i in indices]
+            images, _ = _extract_frames(video_path, mapped)
+            return images, fps
 
         rng = random.Random(self.seed)
 
@@ -514,13 +580,18 @@ class ReviseAgentLoop(AgentLoopBase):
         all_images: list[Image.Image] = []
 
         init_frames = [idx for idx in init_indices if idx >= 0]
-        init_images, fps = _extract_frames(video_path, init_frames)
+        init_images, fps = _extract_action_frames(init_frames)
         if len(init_images) > self.max_vision_inputs:
             init_images = init_images[: self.max_vision_inputs]
             init_frames = init_frames[: len(init_images)]
         timestamps = []
         for idx in init_frames:
-            if self.include_timestamps and fps:
+            if not self.include_timestamps:
+                timestamps.append(None)
+                continue
+            if self.use_1fps_timeline:
+                timestamps.append(float(idx))
+            elif fps:
                 timestamps.append(idx / fps)
             else:
                 timestamps.append(None)
@@ -551,6 +622,8 @@ class ReviseAgentLoop(AgentLoopBase):
             candidate_unseen_frames=candidate_unseen,
             use_candidate_frame_ids=self.use_candidate_frame_ids,
             require_candidate_frames=self.require_candidate_frames,
+            use_1fps_timeline=self.use_1fps_timeline,
+            time_reference=time_reference,
         )
 
         def _with_images(message_list, images):
@@ -614,6 +687,8 @@ class ReviseAgentLoop(AgentLoopBase):
                 candidate_unseen_frames=candidate_unseen,
                 use_candidate_frame_ids=self.use_candidate_frame_ids,
                 require_candidate_frames=self.require_candidate_frames,
+                use_1fps_timeline=self.use_1fps_timeline,
+                time_reference=time_reference,
             )
             messages = _with_images(
                 [
@@ -999,10 +1074,15 @@ class ReviseAgentLoop(AgentLoopBase):
                 valid_requested = valid_requested[:slots_left]
 
             summary_state = summary
-            candidate_images, fps = _extract_frames(video_path, valid_requested)
+            candidate_images, fps = _extract_action_frames(valid_requested)
             candidate_timestamps: list[Optional[float]] = []
             for idx in valid_requested:
-                if self.include_timestamps and fps:
+                if not self.include_timestamps:
+                    candidate_timestamps.append(None)
+                    continue
+                if self.use_1fps_timeline:
+                    candidate_timestamps.append(float(idx))
+                elif fps:
                     candidate_timestamps.append(idx / fps)
                 else:
                     candidate_timestamps.append(None)
@@ -1045,6 +1125,8 @@ class ReviseAgentLoop(AgentLoopBase):
                     candidate_unseen_frames=trial_candidate_unseen,
                     use_candidate_frame_ids=self.use_candidate_frame_ids,
                     require_candidate_frames=self.require_candidate_frames,
+                    use_1fps_timeline=self.use_1fps_timeline,
+                    time_reference=time_reference,
                 )
                 trial_messages = _with_images(
                     [{"role": "user", "content": trial_user_content}],

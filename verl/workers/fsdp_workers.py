@@ -88,6 +88,7 @@ from verl.utils.ray_utils import get_event_loop
 from verl.workers.config import FSDPCriticConfig, FSDPEngineConfig, HFModelConfig, RolloutConfig
 from verl.workers.config.optimizer import build_optimizer
 from verl.workers.rollout import get_rollout_class
+from verl.workers.rollout.replica import TokenOutput
 from verl.workers.sharding_manager.fsdp_ulysses import FSDPUlyssesShardingManager
 
 logger = logging.getLogger(__file__)
@@ -844,7 +845,10 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             )
 
         if self._is_rollout:
-            self._build_rollout(trust_remote_code=self.config.model.get("trust_remote_code", False))
+            # Agent-loop rollouts can use a Transformers-based backend ("hf") that reuses the actor model
+            # directly, so no separate rollout engine is required.
+            if str(self.config.rollout.name) != "hf":
+                self._build_rollout(trust_remote_code=self.config.model.get("trust_remote_code", False))
 
         if self._is_ref:
             ref_model_path = self.config.model.path
@@ -2022,11 +2026,21 @@ class RewardModelWorker(Worker, DistProfilerExtension):
 class AsyncActorRolloutRefWorker(ActorRolloutRefWorker):
     @register(dispatch_mode=Dispatch.DIRECT_ROLLOUT_METHOD)
     async def wake_up(self):
+        if str(self.config.rollout.name) == "hf":
+            if self._is_offload_param:
+                load_fsdp_model_to_gpu(self.actor_module_fsdp)
+            self.actor_module_fsdp.eval()
+            return True
         await self.rollout_mode()
         return True
 
     @register(dispatch_mode=Dispatch.DIRECT_ROLLOUT_METHOD)
     async def sleep(self):
+        if str(self.config.rollout.name) == "hf":
+            self.actor_module_fsdp.train()
+            if self._is_offload_param:
+                offload_fsdp_model_to_cpu(self.actor_module_fsdp)
+            return True
         await self.trainer_mode()
         return True
 
@@ -2053,3 +2067,155 @@ class AsyncActorRolloutRefWorker(ActorRolloutRefWorker):
     ) -> list[int]:
         ret = await self.rollout.generate(prompt_ids, sampling_params, request_id, image_data=image_data)
         return ret
+
+    # ============================ HF Transformers related ============================
+
+    @register(dispatch_mode=Dispatch.DIRECT_ROLLOUT_METHOD, blocking=False)
+    async def hf_generate(
+        self,
+        *,
+        prompt_ids: list[int],
+        sampling_params: dict[str, Any],
+        request_id: str,
+        image_data: Optional[list[Any]] = None,
+        video_data: Optional[list[Any]] = None,
+    ) -> Optional[TokenOutput]:
+        """Token-in/token-out generation using the actor model itself (Transformers).
+
+        This is a fallback backend for models that are not supported by vLLM/SGLang.
+
+        Implementation notes:
+        - Uses `FSDP.summon_full_params(..., rank0_only=True)` and runs generation on rank 0 only.
+        - When `sampling_params['logprobs']` is an int > 0 and `max_new_tokens==1`, returns `top_logprobs`
+          for downstream EAGER margin scoring in the REVISE agent loop.
+        """
+        if str(self.config.rollout.name) != "hf":
+            raise ValueError(f"hf_generate called but rollout.name={self.config.rollout.name!r}")
+
+        sp = dict(sampling_params or {})
+        logprobs_req = sp.pop("logprobs", 0)
+        max_new_tokens = sp.pop("max_new_tokens", None)
+        if max_new_tokens is None:
+            max_new_tokens = sp.pop("max_tokens", 0)
+        try:
+            max_new_tokens_i = int(max_new_tokens or 0)
+        except Exception:
+            max_new_tokens_i = 0
+
+        try:
+            temperature = float(sp.get("temperature", 1.0))
+        except Exception:
+            temperature = 1.0
+        try:
+            top_p = float(sp.get("top_p", 1.0))
+        except Exception:
+            top_p = 1.0
+        try:
+            repetition_penalty = float(sp.get("repetition_penalty", 1.0))
+        except Exception:
+            repetition_penalty = 1.0
+        do_sample = bool(sp.get("do_sample", temperature > 0.0 and top_p > 0.0))
+
+        logprobs_k = 0
+        if isinstance(logprobs_req, bool):
+            logprobs_k = 1 if logprobs_req else 0
+        else:
+            try:
+                logprobs_k = int(logprobs_req or 0)
+            except Exception:
+                logprobs_k = 0
+
+        input_ids_cpu = torch.tensor([prompt_ids], dtype=torch.long)
+        attention_mask_cpu = torch.ones_like(input_ids_cpu)
+
+        multi_modal_inputs_cpu: dict[str, torch.Tensor] = {}
+        if image_data:
+            multi_modal_inputs_cpu = dict(self.processor.image_processor(images=image_data, return_tensors="pt"))
+            image_grid_thw = multi_modal_inputs_cpu.get("image_grid_thw")
+            if image_grid_thw is not None:
+                images_seqlens = torch.repeat_interleave(
+                    image_grid_thw[:, 1] * image_grid_thw[:, 2], image_grid_thw[:, 0]
+                )
+                multi_modal_inputs_cpu["images_seqlens"] = images_seqlens
+
+        position_ids_cpu = None
+        if self.processor is not None and hasattr(self.processor, "get_rope_index"):
+            image_grid_thw = multi_modal_inputs_cpu.get("image_grid_thw")
+            video_grid_thw = multi_modal_inputs_cpu.get("video_grid_thw")
+            vision_position_ids, _ = self.processor.get_rope_index(
+                input_ids=input_ids_cpu,
+                image_grid_thw=image_grid_thw,
+                video_grid_thw=video_grid_thw,
+                attention_mask=attention_mask_cpu,
+            )
+            vision_position_ids = vision_position_ids.transpose(0, 1)
+            valid_mask = attention_mask_cpu[0].bool()
+            text_position_ids = torch.ones((1, input_ids_cpu.shape[1]), dtype=torch.long)
+            text_position_ids[0, valid_mask] = torch.arange(valid_mask.sum().item())
+            text_position_ids = text_position_ids.unsqueeze(0)
+            position_ids_cpu = torch.cat((text_position_ids, vision_position_ids), dim=1)
+
+        device_id = get_device_id()
+        input_ids = input_ids_cpu.to(device_id)
+        attention_mask = attention_mask_cpu.to(device_id)
+        position_ids = position_ids_cpu.to(device_id) if position_ids_cpu is not None else None
+        multi_modal_inputs = {k: v.to(device_id) for k, v in (multi_modal_inputs_cpu or {}).items()}
+
+        module = getattr(self.actor_module_fsdp, "_fsdp_wrapped_module", self.actor_module_fsdp)
+
+        from contextlib import nullcontext
+        import torch.nn.functional as F
+
+        ctx = (
+            FSDP.summon_full_params(self.actor_module_fsdp, rank0_only=True, writeback=False)
+            if torch.distributed.get_world_size() > 1
+            else nullcontext()
+        )
+
+        out: Optional[TokenOutput] = None
+        with ctx:
+            if self.rank == 0:
+                module.eval()
+                with torch.no_grad():
+                    model_inputs: dict[str, Any] = {
+                        "input_ids": input_ids,
+                        "attention_mask": attention_mask,
+                        **multi_modal_inputs,
+                    }
+                    if position_ids is not None:
+                        model_inputs["position_ids"] = position_ids
+
+                    if logprobs_k > 0 and max_new_tokens_i == 1:
+                        outputs = module(**model_inputs)
+                        logits = outputs.logits[:, -1, :]
+                        log_probs = F.log_softmax(logits, dim=-1)
+                        topv, topi = torch.topk(log_probs, k=min(logprobs_k, log_probs.shape[-1]), dim=-1)
+                        top_map = {int(tid): float(lp) for tid, lp in zip(topi[0].tolist(), topv[0].tolist())}
+                        chosen = int(topi[0][0].item())
+                        chosen_lp = float(log_probs[0, chosen].item())
+                        out = TokenOutput(
+                            token_ids=[chosen],
+                            log_probs=[chosen_lp],
+                            top_logprobs=[top_map],
+                            stop_reason="completed",
+                        )
+                    else:
+                        gen_kwargs: dict[str, Any] = {
+                            "max_new_tokens": max_new_tokens_i,
+                            "do_sample": do_sample,
+                            "repetition_penalty": repetition_penalty,
+                            "eos_token_id": self.tokenizer.eos_token_id,
+                            "pad_token_id": self.tokenizer.pad_token_id,
+                            "use_cache": True,
+                        }
+                        if do_sample:
+                            gen_kwargs.update({"temperature": temperature, "top_p": top_p})
+                        gen_ids = module.generate(**model_inputs, **gen_kwargs)
+                        seq = gen_ids[0].tolist()
+                        token_ids = seq[len(prompt_ids) :]
+                        out = TokenOutput(token_ids=token_ids, stop_reason="completed")
+
+            if torch.distributed.get_world_size() > 1:
+                torch.distributed.barrier()
+
+        return out

@@ -263,9 +263,19 @@ def _load_sglang():
     )
     os.environ["SGLANG_USE_CPU_ENGINE"] = "1"
 
-    try:
-        import vllm  # noqa: F401
-    except ImportError:
+    def _vllm_is_usable() -> bool:
+        """SGLang imports a few symbols from vLLM. Some environments can import
+        the top-level `vllm` package but fail when importing compiled extensions
+        (e.g. ABI mismatch with torch). Detect that case and fall back to a
+        lightweight stub.
+        """
+        try:
+            from vllm.model_executor.layers.activation import GeluAndMul, SiluAndMul  # noqa: F401
+        except Exception:
+            return False
+        return True
+
+    if not _vllm_is_usable():
         import sys
         import types
         from unittest.mock import Mock
@@ -304,9 +314,16 @@ def _load_sglang():
     return SGLangReplica
 
 
+def _load_hf():
+    from verl.workers.rollout.hf_server.hf_async_server import HFReplica
+
+    return HFReplica
+
+
 # Register built-in types
 RolloutReplicaRegistry.register("vllm", _load_vllm)
 RolloutReplicaRegistry.register("sglang", _load_sglang)
+RolloutReplicaRegistry.register("hf", _load_hf)
 
 
 # Original function for backward compatibility

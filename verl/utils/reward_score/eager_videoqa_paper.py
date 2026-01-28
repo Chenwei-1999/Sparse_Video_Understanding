@@ -56,6 +56,9 @@ def compute_score(
     gamma: float = 0.99,
     format_reward: float = 0.05,
     stop_round_threshold: int = 2,
+    # Optional shaping: add extra early-stop bonus within the threshold.
+    # When enabled, r_stop becomes: 1 + β * (stop_round_threshold - num_rounds) for correct early stops.
+    stop_bonus_beta: float = 0.0,
     **_: Any,
 ) -> dict[str, float]:
     extra_info = extra_info or {}
@@ -168,7 +171,9 @@ def compute_score(
         r_stop = 0.0
         if act == "answer":
             r_sum = 1.0 if summary_only_correct > 0.0 else 0.0
-            r_stop = 1.0 if stop_early > 0.0 else 0.0
+            if stop_early > 0.0:
+                delta = max(int(stop_round_threshold) - int(num_rounds_i or 0), 0)
+                r_stop = 1.0 + float(stop_bonus_beta) * float(delta)
 
         r_format = 0.0
         if format_reward:
