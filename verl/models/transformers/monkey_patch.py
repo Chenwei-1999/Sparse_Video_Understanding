@@ -22,8 +22,10 @@ from typing import Optional
 import torch
 from transformers.modeling_flash_attention_utils import _flash_attention_forward
 from transformers.modeling_utils import PreTrainedModel
+from transformers.utils import is_flash_attn_2_available
 
 from verl.utils.import_utils import is_trl_available
+from verl.utils.device import is_torch_npu_available
 from verl.utils.transformers_compat import is_transformers_version_in_range
 from verl.utils.ulysses import (
     gather_heads_scatter_seq,
@@ -392,11 +394,25 @@ def apply_monkey_patch(
             from transformers.models.qwen2_vl.modeling_qwen2_vl import Qwen2VLFlashAttention2 as Qwen2VLAttention
 
         if use_remove_padding or ulysses_sp_size > 1:
-            from verl.models.transformers.qwen2_vl import qwen2_vl_attn_forward
+            # NOTE: remove-padding + Ulysses SP relies on flash-attn varlen kernels. If flash-attn
+            # isn't available, patching the attention forward to the flash path will crash.
+            flash_backend_available = is_torch_npu_available(check_device=False) or is_flash_attn_2_available()
+            if not flash_backend_available:
+                if ulysses_sp_size > 1:
+                    raise RuntimeError(
+                        "Ulysses sequence-parallel for Qwen2-VL requires flash-attn (or NPU flash-attn). "
+                        "Install flash-attn or set ulysses_sp_size=1."
+                    )
+                print(
+                    f"[MonkeyPatch] Skipping {model.__class__.__name__} attention patch: "
+                    "flash-attn is not available. Falling back to the default attention implementation."
+                )
+            else:
+                from verl.models.transformers.qwen2_vl import qwen2_vl_attn_forward
 
-            Qwen2_5_VLAttention.forward = qwen2_vl_attn_forward
-            Qwen2VLAttention.forward = qwen2_vl_attn_forward
-            print(f"Monkey patch {model.__class__.__name__} attention layer")
+                Qwen2_5_VLAttention.forward = qwen2_vl_attn_forward
+                Qwen2VLAttention.forward = qwen2_vl_attn_forward
+                print(f"Monkey patch {model.__class__.__name__} attention layer")
 
         # Step 3: patch input for multimodal sequence parallelism
         if ulysses_sp_size > 1:

@@ -730,6 +730,20 @@ class FSDPEngineWithLMHead(FSDPEngine):
             )
         assert pad_mode == DatasetPadMode.NO_PADDING, f"pad_mode {pad_mode} not supported"
 
+        # `use_remove_padding=True` relies on flash-attn (CUDA) or NPU flash-attn varlen kernels.
+        # If flash-attn isn't installed, transparently fall back to padded inputs so training can run.
+        if use_remove_padding:
+            from transformers.utils import is_flash_attn_2_available
+
+            if device_name == "cuda" and not is_flash_attn_2_available():
+                if not getattr(self, "_warned_no_flash_attn_remove_padding", False):
+                    logger.warning(
+                        "use_remove_padding=True but flash-attn is not available; falling back to "
+                        "use_remove_padding=False for this run."
+                    )
+                    self._warned_no_flash_attn_remove_padding = True
+                use_remove_padding = False
+
         multi_modal_inputs = extract_multi_modal_inputs(micro_batch.get("multi_modal_inputs", []))
         input_ids = micro_batch["input_ids"]
         position_ids = micro_batch["position_ids"]

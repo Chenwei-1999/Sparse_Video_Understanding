@@ -482,8 +482,16 @@ class ReviseAgentLoop(AgentLoopBase):
         self.prompt_length = cfg.actor_rollout_ref.rollout.prompt_length
         self.response_length = cfg.actor_rollout_ref.rollout.response_length
         # NOTE: response_length is a padding/trajectory budget; generation is capped separately.
-        self.max_new_tokens = int(cfg.actor_rollout_ref.rollout.get("max_new_tokens", self.response_length))
-        self.max_model_len = int(cfg.actor_rollout_ref.rollout.get("max_model_len", self.prompt_length))
+        # OmegaConf may contain explicit nulls; treat None as "unset".
+        max_new_tokens = cfg.actor_rollout_ref.rollout.get("max_new_tokens", None)
+        if max_new_tokens is None:
+            max_new_tokens = self.response_length
+        self.max_new_tokens = int(max_new_tokens)
+
+        max_model_len = cfg.actor_rollout_ref.rollout.get("max_model_len", None)
+        if max_model_len is None:
+            max_model_len = self.prompt_length
+        self.max_model_len = int(max_model_len)
         revise_cfg = cfg.actor_rollout_ref.rollout.get("revise", {})
 
         self.max_rounds = int(revise_cfg.get("max_rounds", 4))
