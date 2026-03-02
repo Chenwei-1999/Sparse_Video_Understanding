@@ -10,7 +10,6 @@
 external/
 paper/
 paper_backup*/
-docs/NEURIPS_READY_PLAN.md
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
