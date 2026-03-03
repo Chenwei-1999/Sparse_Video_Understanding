@@ -16,7 +16,9 @@ data:
   train_files: /shares/hlw3876/chenwei/NExT-QA/nextqa/train.csv
   val_files: /shares/hlw3876/chenwei/NExT-QA/nextqa/val.csv
   max_prompt_length: 8192
-  max_response_length: 512
+  # IMPORTANT: multi-round REVISE trajectories can be long (especially with vision tokens).
+  # Keep a large padding budget to avoid truncation-related shape mismatches in VLM RoPE indexing.
+  max_response_length: 4096
   train_batch_size: 8
   return_raw_chat: True
   return_multi_modal_inputs: False

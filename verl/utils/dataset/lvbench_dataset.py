@@ -109,7 +109,7 @@ class LVBenchDataset(Dataset):
             max_samples = int(cfg_max_samples)
 
         lv_cfg = (config or {}).get("lvbench", {}) if isinstance(config, dict) else {}
-        video_cache_dir = str(lv_cfg.get("video_cache_dir") or "/tmp/chenwei_video_cache")
+        video_cache_dir = str(lv_cfg.get("video_cache_dir") or "/tmp/lvbench_video_cache")
         hf_split = str(lv_cfg.get("split") or "")
 
         # Interpret `data_files` as the split when it looks like a split name.

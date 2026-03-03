@@ -68,7 +68,7 @@ def process_video(
     fps_max_frames: Optional[int] = None,
     return_video_sample_fps: bool = False,
     return_video_metadata: bool = False,
-) -> torch.Tensor:
+):
     """Converts a video dict into a [n_frames, 3, H, W] tensor
 
     Add video sample FPS in a future MR
@@ -76,7 +76,8 @@ def process_video(
 
     if not isinstance(video, dict) or "video" not in video:
         raise NotImplementedError(VIDEO_FORMAT_HELP)
-    assert nframes is None or fps is None, "Can't use both `nframes` or `fps`"
+    if nframes is not None and fps is not None:
+        raise ValueError("Can't use both `nframes` and `fps`")
 
     # Shallow copy... since we might want to add some keys
     video = dict(video)

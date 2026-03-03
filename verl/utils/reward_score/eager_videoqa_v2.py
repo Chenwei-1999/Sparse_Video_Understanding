@@ -20,11 +20,11 @@ _THINK_RE = re.compile(r"<think>(.*?)</think>", re.DOTALL | re.IGNORECASE)
 _HYP_RE = re.compile(r"\bH\s*:\s*([A-E])\b", re.IGNORECASE)
 
 _STRICT_ANSWER_RE = re.compile(
-    r"^\s*<think>.*?</think>\s*<answer>\s*([A-E])\s*</answer>\s*$",
+    r"^\s*(?:<think>.*?</think>\s*)?<answer>\s*([A-E])\s*</answer>\s*$",
     re.DOTALL | re.IGNORECASE,
 )
 _STRICT_SELECT_RE = re.compile(
-    r"^\s*<think>.*?</think>\s*<summary>.*?</summary>\s*<frames>\s*\d+(?:\s*,\s*\d+)*\s*</frames>\s*$",
+    r"^\s*(?:<think>.*?</think>\s*)?<summary>.*?</summary>\s*<frames>\s*\d+(?:\s*,\s*\d+)*\s*</frames>\s*$",
     re.DOTALL | re.IGNORECASE,
 )
 
@@ -81,7 +81,7 @@ def _summary_quality(summary_text: str, num_choices: int) -> float:
         return 0.0
     h_field = h_match.group(1)
     letters = re.findall(r"\b([A-E])\b", h_field, re.IGNORECASE)
-    unique_letters = {l.upper() for l in letters}
+    unique_letters = {letter.upper() for letter in letters}
     if len(unique_letters) != 1:
         return 0.0
     if _normalize_answer_letter(next(iter(unique_letters)), num_choices) is None:
@@ -180,7 +180,25 @@ def compute_score(
         }
 
     num_choices = len(choices) if isinstance(choices, list) else 0
-    correct_letter = chr(ord("A") + int(answer_idx))
+    try:
+        idx_int = int(answer_idx)
+    except (ValueError, TypeError):
+        return {
+            "score": 0.0,
+            "answer_correct": 0.0,
+            "format_valid": 0.0,
+            "summary_hyp_correct": 0.0,
+            "stop_early": 0.0,
+        }
+    if idx_int < 0 or idx_int >= max(num_choices, 5):
+        return {
+            "score": 0.0,
+            "answer_correct": 0.0,
+            "format_valid": 0.0,
+            "summary_hyp_correct": 0.0,
+            "stop_early": 0.0,
+        }
+    correct_letter = chr(ord("A") + idx_int)
 
     pred_answer_text = _extract_tag(solution_str, _ANSWER_RE)
     pred_letter = _normalize_answer_letter(pred_answer_text or "", num_choices)

@@ -54,10 +54,10 @@ def _collapse_ws(text: str) -> str:
 
 
 def _extract_tag(text: str, pattern: re.Pattern[str]) -> Optional[str]:
-    m = pattern.search(text or "")
-    if not m:
+    matches = list(pattern.finditer(text or ""))
+    if not matches:
         return None
-    return (m.group(1) or "").strip()
+    return (matches[-1].group(1) or "").strip()
 
 
 def _dedupe_preserve_order(items: list[int]) -> list[int]:

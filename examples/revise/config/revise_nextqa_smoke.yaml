@@ -63,7 +63,7 @@ trainer:
   train_batch_size: ${data.train_batch_size}
   test_freq: 1
   save_freq: -1
-  eval_only: True
+  val_only: True
 
 ray_kwargs:
   ray_init:

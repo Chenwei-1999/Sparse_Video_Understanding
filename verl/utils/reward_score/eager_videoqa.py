@@ -72,7 +72,10 @@ def compute_score(
 
     answer_correct = False
     if pred_idx is not None and answer_idx is not None:
-        answer_correct = pred_idx == int(answer_idx)
+        try:
+            answer_correct = pred_idx == int(answer_idx)
+        except (ValueError, TypeError):
+            answer_correct = False
     elif pred_answer and answer_text:
         answer_correct = _normalize(pred_answer) == _normalize(str(answer_text))
 

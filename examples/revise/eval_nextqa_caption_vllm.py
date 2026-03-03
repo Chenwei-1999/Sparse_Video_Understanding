@@ -501,7 +501,7 @@ def main() -> int:
                 )
             if args.progress_interval and (processed % int(args.progress_interval) == 0):
                 elapsed = time.time() - start_eval
-                acc_now = correct / max(1, processed)
+                acc_now = correct / max(1, processed - failed)
                 print(
                     f"[{processed}/{len(samples)}] acc={acc_now:.4f} failed={failed} invalid={invalid_outputs} "
                     f"avg_caption_chars={total_caption_chars / max(1, processed):.1f} elapsed_s={elapsed:.1f}",
@@ -509,7 +509,7 @@ def main() -> int:
                 )
 
         elapsed_s = time.time() - start_eval
-        samples_n = max(1, processed)
+        samples_n = max(1, processed - failed)
         acc = correct / samples_n
         avg_caption_chars = total_caption_chars / samples_n
 
@@ -543,7 +543,8 @@ def main() -> int:
         prompt_log_lines = 0
         prompt_log_bytes = 0
         if args.log_jsonl and os.path.exists(args.log_jsonl):
-            prompt_log_lines = sum(1 for _ in open(args.log_jsonl, "r", encoding="utf-8"))
+            with open(args.log_jsonl, "r", encoding="utf-8") as _f:
+                prompt_log_lines = sum(1 for _ in _f)
             prompt_log_bytes = os.path.getsize(args.log_jsonl)
 
         if args.summary_json:

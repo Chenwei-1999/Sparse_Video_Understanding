@@ -168,7 +168,7 @@ class PrimeRewardManager(AbstractRewardManager):
         response_ids = data.batch["responses"]
         valid_response_length = data.batch["attention_mask"][:, prompt_length:].sum(dim=-1)
         sequences_str = self.tokenizer.batch_decode(response_ids, skip_special_tokens=True)
-        data_sources = data.non_tensor_batch["data_source"]
+        data_sources = data.non_tensor_batch[self.reward_fn_key]
 
         scores = self.verify(data)
 
@@ -181,7 +181,7 @@ class PrimeRewardManager(AbstractRewardManager):
 
             if already_print_data_sources[data_source] < self.num_examine:
                 already_print_data_sources[data_source] += 1
-                print(sequences_str)
+                print(sequences_str[i])
 
         if return_dict:
             return {"reward_tensor": reward_tensor}

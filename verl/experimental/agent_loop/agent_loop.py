@@ -74,8 +74,8 @@ class AsyncLLMServerManager:
         random.shuffle(self.server_handles)
 
         # Least requests load balancing
-        self.weighted_serveres = [[0, idx, server] for idx, server in enumerate(self.server_handles)]
-        heapq.heapify(self.weighted_serveres)
+        self.weighted_servers = [[0, idx, server] for idx, server in enumerate(self.server_handles)]
+        heapq.heapify(self.weighted_servers)
 
         # LRU cache to map request_id to server
         self.request_id_to_server = LRUCache(maxsize=max_cache_size)
@@ -85,9 +85,9 @@ class AsyncLLMServerManager:
         if request_id in self.request_id_to_server:
             return self.request_id_to_server[request_id]
 
-        _, _, server = self.weighted_serveres[0]
-        self.weighted_serveres[0][0] += 1
-        heapq.heapreplace(self.weighted_serveres, self.weighted_serveres[0])
+        _, _, server = self.weighted_servers[0]
+        self.weighted_servers[0][0] += 1
+        heapq.heapreplace(self.weighted_servers, self.weighted_servers[0])
         self.request_id_to_server[request_id] = server
         return server
 
@@ -960,11 +960,11 @@ class AgentLoopManager:
         if self.reward_model_manager:
             self.reward_model_manager.wake_up()
 
-        chunkes = prompts.chunk(len(self.agent_loop_workers))
+        chunks = prompts.chunk(len(self.agent_loop_workers))
         outputs = ray.get(
             [
                 worker.generate_sequences.remote(chunk)
-                for worker, chunk in zip(self.agent_loop_workers, chunkes, strict=True)
+                for worker, chunk in zip(self.agent_loop_workers, chunks, strict=True)
             ]
         )
         output = DataProto.concat(outputs)

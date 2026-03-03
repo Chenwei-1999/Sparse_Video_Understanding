@@ -279,7 +279,7 @@ def _sample_uniform_indices(frame_count: int, n: int) -> list[int]:
     if n == 1:
         return [frame_count // 2]
     if frame_count == 1:
-        return [0] * n
+        return [0]
     return [round(i * (frame_count - 1) / (n - 1)) for i in range(n)]
 
 
@@ -376,6 +376,8 @@ def _summary_has_stale_boilerplate(summary_text: str, *, seen_count: int) -> boo
 
 
 def _b64_jpeg(img: Image.Image) -> str:
+    if img.mode != "RGB":
+        img = img.convert("RGB")
     buf = io.BytesIO()
     img.save(buf, format="JPEG", quality=90)
     return base64.b64encode(buf.getvalue()).decode("utf-8")

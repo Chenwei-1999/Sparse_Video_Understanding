@@ -102,7 +102,7 @@ def default_compute_score(
         from . import search_r1_like_qa_em
 
         res = search_r1_like_qa_em.compute_score(solution_str, ground_truth)
-    elif data_source in ["revise_nextqa", "nextqa"]:
+    elif data_source in ["revise_nextqa", "nextqa", "revise_lvbench", "lvbench"]:
         from . import eager_videoqa
 
         res = eager_videoqa.compute_score(solution_str, ground_truth, extra_info=extra_info)

@@ -687,6 +687,7 @@ def _build_user_text(
     use_candidate_frame_ids: bool,
     require_candidate_frames: bool,
     time_reference: str = "",
+    num_options: int = 0,
 ) -> str:
     letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 
@@ -703,7 +704,8 @@ def _build_user_text(
             out = letters[rem] + out
         return out
 
-    allowed_letters = ", ".join(list(letters[: max(1, question_block.count("\n") - 1)]))  # heuristic
+    n_opts = num_options if num_options > 0 else max(1, question_block.count("\n") - 1)
+    allowed_letters = ", ".join(list(letters[: n_opts]))
 
     lines: list[str] = []
     lines.append(f"Round {round_idx} / Question:")
@@ -1064,6 +1066,7 @@ def main() -> None:
                 use_candidate_frame_ids=bool(args.use_candidate_frame_ids),
                 require_candidate_frames=bool(args.require_candidate_frames),
                 time_reference=sample.time_reference,
+                num_options=len(sample.options),
             )
             if args.force_final_answer and round_idx >= args.max_rounds:
                 user_text = (

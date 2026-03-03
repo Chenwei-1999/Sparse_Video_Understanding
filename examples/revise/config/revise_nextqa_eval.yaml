@@ -41,9 +41,14 @@ actor_rollout_ref:
       initial_sampling: uniform
       include_timestamps: True
 
+algorithm:
+  adv_estimator: grpo
+  use_kl_in_reward: False
+
 trainer:
   project_name: revise_nextqa
   experiment_name: qwen2.5-vl-7b-revise-eval
   total_epochs: 0
+  n_gpus_per_node: 4
   test_freq: 1
   save_freq: -1
