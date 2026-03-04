@@ -41,7 +41,14 @@ from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.utils.data import Dataset, DistributedSampler
 from torchdata.stateful_dataloader import StatefulDataLoader
 from tqdm import tqdm
-from transformers import AutoConfig, AutoModelForCausalLM, PreTrainedModel
+from transformers import (
+    AutoConfig,
+    AutoModel,
+    AutoModelForCausalLM,
+    AutoModelForImageTextToText,
+    AutoModelForVision2Seq,
+    PreTrainedModel,
+)
 
 import verl.utils.hdfs_io as hdfs_io
 from verl.utils.attention_utils import index_first_axis, pad_input, rearrange, unpad_input
@@ -237,7 +244,41 @@ class FSDPSFTTrainer:
         )
 
         with init_context():
-            self.model: PreTrainedModel = AutoModelForCausalLM.from_pretrained(
+            # Auto-detect model class (VLM vs causal LM), mirroring fsdp_workers.py
+            import warnings
+
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                has_remote_code = hasattr(config, "auto_map") and any(
+                    config.architectures[0] in val for val in config.auto_map.values()
+                )
+                if has_remote_code:
+                    auto_class = next(
+                        k for k, v in config.auto_map.items() if config.architectures[0] in v
+                    )
+                    match auto_class:
+                        case "AutoModelForVision2Seq":
+                            model_class = AutoModelForVision2Seq
+                        case "AutoModelForCausalLM":
+                            model_class = AutoModelForCausalLM
+                        case "AutoModelForImageTextToText":
+                            model_class = AutoModelForImageTextToText
+                        case _:
+                            model_class = AutoModel
+                else:
+                    if type(config) in AutoModelForVision2Seq._model_mapping.keys():
+                        model_class = AutoModelForVision2Seq
+                    elif type(config) in AutoModelForCausalLM._model_mapping.keys():
+                        model_class = AutoModelForCausalLM
+                    elif type(config) in AutoModelForImageTextToText._model_mapping.keys():
+                        model_class = AutoModelForImageTextToText
+                    else:
+                        model_class = AutoModel
+
+            if self.device_mesh.get_rank() == 0:
+                print(f"Using model class: {model_class.__name__}")
+
+            self.model: PreTrainedModel = model_class.from_pretrained(
                 local_model_path,
                 config=config,
                 torch_dtype=torch_dtype,
