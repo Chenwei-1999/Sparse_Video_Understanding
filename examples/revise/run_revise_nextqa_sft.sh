@@ -42,4 +42,14 @@ torchrun --nproc_per_node="$N_GPUS" \
     --config-name revise_nextqa_sft \
     "$@"
 
+# Step 3: Copy preprocessor_config.json to HF checkpoint (needed for vLLM VLM loading)
+BASE_MODEL="${BASE_MODEL:-/shares/hlw3876/chenwei/hf_cache/models--Qwen--Qwen2.5-VL-3B-Instruct/snapshots/66285546d2b821cf421d4f5eb2576359d3770cd3}"
+SFT_CKPT_DIR="${SFT_CKPT_DIR:-$PROJECT_DIR/outputs/revise_nextqa_sft}"
+for hf_dir in "$SFT_CKPT_DIR"/global_step_*/huggingface; do
+    if [ -d "$hf_dir" ] && [ ! -f "$hf_dir/preprocessor_config.json" ]; then
+        cp "$BASE_MODEL/preprocessor_config.json" "$hf_dir/"
+        echo "Copied preprocessor_config.json to $hf_dir"
+    fi
+done
+
 echo "=== SFT training complete ==="

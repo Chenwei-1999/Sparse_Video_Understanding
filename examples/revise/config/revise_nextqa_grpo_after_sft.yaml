@@ -37,7 +37,7 @@ data:
 actor_rollout_ref:
   model:
     # Point to the SFT checkpoint (override via CLI or update after SFT)
-    path: ${hydra:runtime.cwd}/outputs/revise_nextqa_sft/hf_model
+    path: /home/cxk2993/VideoReasoning/outputs/revise_nextqa_sft/global_step_972/huggingface
   ref:
     fsdp_config:
       model_dtype: bfloat16
@@ -105,7 +105,7 @@ trainer:
   save_freq: 100
   max_actor_ckpt_to_keep: 1
   logger: ["console", "wandb"]
-  default_local_dir: ${hydra:runtime.cwd}/outputs/revise_nextqa_grpo_after_sft
+  default_local_dir: /home/cxk2993/VideoReasoning/outputs/revise_nextqa_grpo_after_sft
 
 ray_kwargs:
   ray_init:
