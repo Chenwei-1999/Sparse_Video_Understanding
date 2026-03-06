@@ -10,7 +10,6 @@ import logging
 import math
 import os
 import random
-import re
 import time
 from typing import Any, Optional
 from uuid import uuid4
@@ -18,6 +17,27 @@ from uuid import uuid4
 import numpy as np
 from PIL import Image
 
+from examples.revise.pnp_prompts import SYSTEM_PROMPT
+from examples.revise.pnp_utils import (
+    ANSWER_RE,
+    FRAMES_RE,
+    SUMMARY_RE,
+    THINK_RE,
+    contains_banned_example,
+    dedupe_preserve_order,
+    extract_tag,
+    format_frame_list,
+    format_intervals,
+    in_intervals,
+    indices_to_intervals,
+    is_placeholder,
+    normalize_answer_letter,
+    parse_int_list,
+    propose_candidate_frames,
+    sample_uniform_indices,
+    summary_has_ohrpu,
+    unseen_intervals,
+)
 from verl.experimental.agent_loop.agent_loop import AgentLoopBase, AgentLoopOutput, register
 from verl.utils.profiler import simple_timer
 
@@ -25,217 +45,28 @@ logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
-_SUMMARY_RE = re.compile(r"<summary>(.*?)</summary>", re.DOTALL | re.IGNORECASE)
-_FRAMES_RE = re.compile(r"<frames>(.*?)</frames>", re.DOTALL | re.IGNORECASE)
-_ANSWER_RE = re.compile(r"<answer>(.*?)</answer>", re.DOTALL | re.IGNORECASE)
-_THINK_RE = re.compile(r"<think>(.*?)</think>", re.DOTALL | re.IGNORECASE)
-
-_PLACEHOLDER_SET = {"...", "…", "none", "n/a", "na", "null", "unknown", "unsure", "uncertain"}
-
-
-DEFAULT_SYSTEM_PROMPT = (
-    "You are REVISE, a multi-round video reasoning agent.\n"
-    "Each round you will see: (1) a multiple-choice question with options, (2) the current belief summary, "
-    "and (3) a few sampled video frames.\n"
-    "If you are confident, answer the question.\n"
-    "If you are NOT confident, request MORE video frames to view NEXT.\n"
-    "Frames are sampled at ~1 fps; frame index ≈ timestamp in seconds.\n\n"
-    "IMPORTANT: Output must follow EXACTLY ONE of the two formats below. Do not output any text outside tags.\n"
-    "Output ONLY <summary> plus either <frames> (request) OR <answer> (final).\n"
-    "Do NOT output <think>.\n"
-    "Do NOT output bare placeholders like '...', 'none', or 'N/A' as your summary fields.\n"
-    "It's OK to say something is unclear/unknown *within a sentence*, but do not leave fields empty.\n\n"
-    "Format 1 — Request more frames (use this only if NOT confident):\n"
-    "<summary>P: previously seen frames show a person in the scene interacting with objects; "
-    "O: I observe an action that may be relevant to the question; "
-    "H: based on the evidence so far, my belief is updated but still incomplete; "
-    "U: a key detail needed to answer is still unclear; "
-    "R: request additional frames to gather the missing evidence</summary>\n"
-    "<frames>1, 3</frames>\n\n"
-    "If Candidate Frame IDs are provided in the user prompt, request using those IDs (e.g., <frames>1, 3</frames>).\n\n"
-    "Format 2 — Answer now (use this if confident):\n"
-    "<summary>P: previously seen frames already contain the key evidence; "
-    "O: the answer-relevant evidence is visible in the shown frames; "
-    "H: my belief is updated based on the observed evidence; "
-    "U: no remaining ambiguity that affects the answer; "
-    "R: answered</summary>\n"
-    "<answer>B</answer>\n\n"
-    "Tag meanings:\n"
-    "- <summary>: the ONLY persistent memory across rounds. Keep it short and update it EVERY round.\n"
-    "  The summary MUST be written in this exact order: P → O → H → U → R.\n"
-    "  - P (Previously seen): which frames have already been used/seen (write as a sentence; no Python lists).\n"
-    "  - O (Observations): what you currently observe in the selected frames.\n"
-    "  - H (Belief updates): updated belief based on what has been observed so far (do NOT include the final answer letter).\n"
-    "  - U (Uncertainties): what is still unknown or ambiguous.\n"
-    "  - R (Reasons): why you need more frames and what evidence you are looking for next (or 'answered').\n\n"
-    "Rules:\n"
-    "- Frame indices are 0-based in [0, L-1].\n"
-    "- If you are confident, answer instead of requesting more frames.\n"
-    "- If requesting, choose 1 to {max_frames_per_round} NEW frames to view NEXT.\n"
-    "- Do NOT output any frame index from the Seen frames list; those are already viewed.\n"
-    "- When provided, request frames ONLY within the allowed unseen frame ranges.\n"
-    "- When Candidate Frame IDs are provided, output those IDs (1..K) in <frames> instead of raw frame indices.\n"
-    "- In <frames>, output comma-separated integers only (no brackets, no text).\n"
-    "- In <summary>, include P/O/H/U/R as short natural-language sentences that reflect your current understanding.\n"
-    "- The order inside <summary> MUST be: P then O then H then U then R.\n"
-    "- In P, describe previously seen frames in a sentence (describe content; do NOT list frame indices or use Python lists like [4, 8, 12]).\n"
-    "- In <answer>, output EXACTLY ONE option letter shown in the question (e.g., A/B/C/D/E). No words/punctuation.\n"
-    "- Never copy the example text; replace it with information from the current video.\n"
-)
-
-
-def _contains_banned_example(text: str) -> bool:
-    """Detect accidental copying of legacy few-shot example content."""
-    t = _collapse_ws(text).lower()
-    if not t:
-        return False
-    # Legacy prompt example used a specific name/story that should never be repeated verbatim.
-    if "george approaching a shelf" in t:
-        return True
-    if "george pauses" in t and "shelf" in t:
-        return True
-    return False
-
-
-def _dedupe_preserve_order(indices: list[int]) -> list[int]:
-    seen: set[int] = set()
-    out: list[int] = []
-    for idx in indices or []:
-        if idx in seen:
-            continue
-        seen.add(idx)
-        out.append(idx)
-    return out
-
-
-def _extract_tag(text: str, tag_re: re.Pattern[str]) -> Optional[str]:
-    matches = list(tag_re.finditer(text))
-    if not matches:
-        return None
-    return matches[-1].group(1).strip()
-
-
-def _collapse_ws(text: str) -> str:
-    return re.sub(r"\s+", " ", str(text)).strip()
-
-
-def _format_frame_list(frames: list[int]) -> str:
-    if not frames:
-        return "no frames yet"
-    return ", ".join(str(int(i)) for i in frames)
-
-def _indices_to_intervals(indices: list[int]) -> list[tuple[int, int]]:
-    """Convert a list of indices to inclusive [start, end] intervals."""
-    if not indices:
-        return []
-    sorted_unique = sorted({int(i) for i in indices})
-    intervals: list[tuple[int, int]] = []
-    start = prev = sorted_unique[0]
-    for idx in sorted_unique[1:]:
-        if idx == prev + 1:
-            prev = idx
-            continue
-        intervals.append((start, prev))
-        start = prev = idx
-    intervals.append((start, prev))
-    return intervals
-
-
-def _unseen_intervals(frame_count: int, seen_frames: list[int]) -> list[tuple[int, int]]:
-    """Return unseen frame ranges as inclusive [start, end] intervals."""
-    if frame_count <= 0:
-        return []
-    seen = sorted({int(i) for i in (seen_frames or []) if 0 <= int(i) < frame_count})
-    anchors = [-1, *seen, frame_count]
-    intervals: list[tuple[int, int]] = []
-    for a, b in zip(anchors, anchors[1:], strict=False):
-        start = a + 1
-        end = b - 1
-        if start <= end:
-            intervals.append((start, end))
-    return intervals
-
-
-def _format_intervals(intervals: list[tuple[int, int]]) -> str:
-    if not intervals:
-        return "none"
-    parts: list[str] = []
-    for start, end in intervals:
-        if start == end:
-            parts.append(str(start))
-        else:
-            parts.append(f"{start}-{end}")
-    return "; ".join(parts)
-
-
-def _in_intervals(idx: int, intervals: list[tuple[int, int]]) -> bool:
-    for start, end in intervals:
-        if start <= idx <= end:
-            return True
-    return False
-
-
-def _is_placeholder(text: str) -> bool:
-    t = _collapse_ws(text).lower()
-    if not t:
-        return True
-    if "..." in t or "…" in t:
-        return True
-    if t in _PLACEHOLDER_SET:
-        return True
-    if re.fullmatch(r"[.·•…]+", t):
-        return True
-    # Too short: often a placeholder like "ok", "idk", etc.
-    alnum = re.findall(r"[a-z0-9]+", t)
-    if len(alnum) <= 1 and len(t) <= 6:
-        return True
-    return False
-
-
-def _summary_has_ohrpu(summary_text: str) -> bool:
-    if summary_text is None:
-        return False
-    s = _collapse_ws(summary_text)
-    keys = ["P", "O", "H", "U", "R"]
-    positions = []
-    for key in keys:
-        m = re.search(rf"\b{key}\s*:\s*", s, re.IGNORECASE)
-        if m is None:
-            return False
-        positions.append(m.start())
-    return all(a < b for a, b in zip(positions, positions[1:], strict=False))
-
-
-def _parse_frame_indices(text: str) -> list[int]:
-    numbers = re.findall(r"\d+", text)
-    return [int(n) for n in numbers]
-
-
-def _normalize_answer_letter(answer_text: str, num_choices: int) -> Optional[str]:
-    allowed = {chr(ord("A") + i) for i in range(max(0, num_choices))}
-    if not allowed:
-        allowed = {"A", "B", "C", "D", "E"}
-
-    candidate = answer_text.strip().upper()
-    if candidate in allowed:
-        return candidate
-
-    # Common variants: "A.", "(A)", "Answer: A", etc.
-    match = re.search(r"\b([A-E])\b", candidate)
-    if match:
-        letter = match.group(1).upper()
-        if letter in allowed:
-            return letter
-
-    match = re.search(r"([A-E])", candidate)
-    if match:
-        letter = match.group(1).upper()
-        if letter in allowed:
-            return letter
-    return None
+# Re-export under old private names for backward compatibility within this module.
+DEFAULT_SYSTEM_PROMPT = SYSTEM_PROMPT
+_SUMMARY_RE = SUMMARY_RE
+_FRAMES_RE = FRAMES_RE
+_ANSWER_RE = ANSWER_RE
+_THINK_RE = THINK_RE
+_contains_banned_example = contains_banned_example
+_dedupe_preserve_order = dedupe_preserve_order
+_extract_tag = extract_tag
+_format_frame_list = format_frame_list
+_format_intervals = format_intervals
+_in_intervals = in_intervals
+_indices_to_intervals = indices_to_intervals
+_is_placeholder = is_placeholder
+_normalize_answer_letter = normalize_answer_letter
+_parse_frame_indices = parse_int_list
+_summary_has_ohrpu = summary_has_ohrpu
+_unseen_intervals = unseen_intervals
 
 
 def _sample_uniform_indices(frame_count: int, n: int) -> list[int]:
+    """Agent-loop variant using numpy (matches training-time behavior)."""
     if frame_count <= 0:
         return list(range(n))
     if n <= 1:
@@ -249,39 +80,8 @@ def _propose_candidate_unseen_frames(
     k: int,
     rng: random.Random,
 ) -> list[int]:
-    """Suggest a small list of unseen frames to help the model avoid repeating seen indices."""
-    if frame_count <= 0 or k <= 0:
-        return []
-    if len(seen) >= frame_count:
-        return []
-
-    seen_sorted = sorted(i for i in seen if 0 <= i < frame_count)
-    anchors = sorted(set([0, frame_count - 1, *seen_sorted]))
-
-    candidates: list[int] = []
-    gaps: list[tuple[int, int, int]] = []
-    for a, b in zip(anchors, anchors[1:], strict=False):
-        if b - a <= 1:
-            continue
-        gaps.append((b - a, a, b))
-    gaps.sort(reverse=True)
-    for _, a, b in gaps:
-        mid = (a + b) // 2
-        for d in (0, -1, 1, -2, 2, -3, 3):
-            idx = mid + d
-            if a < idx < b and idx not in seen and idx not in candidates:
-                candidates.append(idx)
-                break
-        if len(candidates) >= k:
-            return sorted(candidates[:k])
-
-    need = k - len(candidates)
-    if need > 0:
-        remaining = [i for i in range(frame_count) if i not in seen and i not in candidates]
-        if remaining:
-            candidates.extend(rng.sample(remaining, k=min(need, len(remaining))))
-
-    return sorted(candidates[:k])
+    """Alias for the shared propose_candidate_frames."""
+    return propose_candidate_frames(frame_count, seen, k, rng)
 
 
 def _load_video_meta(video_path: str) -> tuple[Optional[int], Optional[float]]:
