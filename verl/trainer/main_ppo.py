@@ -156,14 +156,8 @@ class TaskRunner:
             actor_rollout_cls = AsyncActorRolloutRefWorker
             ray_worker_group_cls = RayWorkerGroup
 
-        elif config.actor_rollout_ref.actor.strategy == "megatron":
-            from verl.workers.megatron_workers import AsyncActorRolloutRefWorker
-
-            actor_rollout_cls = AsyncActorRolloutRefWorker
-            ray_worker_group_cls = RayWorkerGroup
-
         else:
-            raise NotImplementedError
+            raise NotImplementedError(f"Unknown actor strategy: {config.actor_rollout_ref.actor.strategy}")
 
         self.role_worker_mapping[Role.ActorRollout] = ray.remote(actor_rollout_cls)
         self.mapping[Role.ActorRollout] = "global_pool"
@@ -184,12 +178,8 @@ class TaskRunner:
             else:
                 raise ValueError(f"Invalid use_legacy_worker_impl: {use_legacy_worker_impl}")
 
-        elif config.critic.strategy == "megatron":
-            # TODO: switch this to TrainingWorker as well
-            from verl.workers.megatron_workers import CriticWorker
-
         else:
-            raise NotImplementedError
+            raise NotImplementedError(f"Unknown critic strategy: {config.critic.strategy}")
 
         from verl.trainer.ppo.ray_trainer import Role
 
@@ -227,10 +217,8 @@ class TaskRunner:
             if use_legacy_worker_impl in ["auto", "enable", "disable"]:
                 if config.reward_model.strategy in {"fsdp", "fsdp2"}:
                     from verl.workers.fsdp_workers import RewardModelWorker
-                elif config.reward_model.strategy == "megatron":
-                    from verl.workers.megatron_workers import RewardModelWorker
                 else:
-                    raise NotImplementedError
+                    raise NotImplementedError(f"Unknown reward_model strategy: {config.reward_model.strategy}")
             # elif use_legacy_worker_impl == "disable":
             #     from verl.workers.engine_workers import RewardModelWorker
             #

@@ -3,13 +3,10 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import random
-import re
 import shutil
-import socket
 import subprocess
 import sys
 import time
@@ -17,7 +14,17 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 import pandas as pd
-import requests
+
+from examples.revise.pnp_utils import (
+    ANSWER_RE,
+    get_model_id,
+    maybe_log_jsonl,
+    normalize_video_id,
+    stable_sample_id_nextqa,
+    stop_server,
+    truncate_text,
+    wait_port,
+)
 
 try:
     import wandb  # type: ignore
@@ -25,7 +32,6 @@ except Exception:  # pragma: no cover
     wandb = None
 
 
-_ANSWER_RE = re.compile(r"<answer>(.*?)</answer>", re.DOTALL | re.IGNORECASE)
 _CAPTION_CACHE: dict[str, dict[int, str]] = {}
 
 
@@ -34,27 +40,6 @@ SYSTEM_PROMPT = (
     "You will be given a question with options and video captions sampled at ~1 fps (caption index ≈ seconds).\n"
     "Answer with ONLY the option letter (A/B/C/D/E). Do not output any other text.\n"
 )
-
-
-def _wait_port(host: str, port: int, timeout_s: int) -> None:
-    start = time.time()
-    while time.time() - start < timeout_s:
-        try:
-            with socket.create_connection((host, port), timeout=1.0):
-                return
-        except OSError:
-            time.sleep(1)
-    raise TimeoutError(f"Timed out waiting for {host}:{port} to accept connections after {timeout_s}s")
-
-
-def _get_model_id(base_url: str, timeout: int = 30) -> str:
-    resp = requests.get(f"{base_url}/v1/models", timeout=timeout)
-    resp.raise_for_status()
-    data = resp.json()
-    models = data.get("data", [])
-    if not models:
-        raise RuntimeError(f"No models returned from {base_url}/v1/models")
-    return models[0]["id"]
 
 
 def _chat_once(
@@ -68,6 +53,8 @@ def _chat_once(
     max_tokens: int,
     timeout_s: int,
 ) -> str:
+    import requests
+
     payload = {
         "model": model_id,
         "messages": [
@@ -98,7 +85,7 @@ def _extract_answer_letter(text: str) -> Optional[str]:
     raw = (text or "").strip()
     if not raw:
         return None
-    m = _ANSWER_RE.search(raw)
+    m = ANSWER_RE.search(raw)
     if m:
         cand = (m.group(1) or "").strip()
         if cand:
@@ -111,33 +98,6 @@ def _extract_answer_letter(text: str) -> Optional[str]:
             return ch.upper()
         break
     return None
-
-
-def _stable_sample_id(video_id: str, question: str, choices: list[str], answer_idx: int) -> str:
-    payload = {
-        "video_id": str(video_id),
-        "question": str(question),
-        "choices": [str(c) for c in (choices or [])],
-        "answer_idx": int(answer_idx),
-    }
-    return hashlib.sha1(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
-
-
-def _normalize_video_id(video_id: Any) -> str:
-    if isinstance(video_id, int):
-        return str(video_id)
-    if isinstance(video_id, float):
-        return str(int(video_id))
-    return str(video_id)
-
-
-def _truncate_text(text: str, max_chars: int) -> str:
-    if max_chars <= 0:
-        return text
-    text = text or ""
-    if len(text) <= max_chars:
-        return text
-    return text[: max_chars].rstrip() + "…"
 
 
 def _clip_middle(text: str, max_chars: int) -> str:
@@ -192,7 +152,7 @@ def _format_caption_timeline(
     lines: list[str] = []
     total_chars = 0
     for idx in sorted(captions):
-        cap = _truncate_text(captions.get(idx) or "", per_caption_max_chars)
+        cap = truncate_text(captions.get(idx) or "", per_caption_max_chars)
         line = f"{idx}: {cap}"
         lines.append(line)
         total_chars += len(line) + 1
@@ -228,7 +188,7 @@ def _load_nextqa_samples(
 
     samples: list[NextQASample] = []
     for _, row in df.iterrows():
-        video_id = _normalize_video_id(row["video"])
+        video_id = normalize_video_id(row["video"])
         rel = video_map.get(video_id)
         if rel is None:
             continue
@@ -241,7 +201,7 @@ def _load_nextqa_samples(
         answer_idx = int(row.get("answer", 0))
         samples.append(
             NextQASample(
-                sample_id=_stable_sample_id(video_id, str(row.get("question", "")), choices, answer_idx),
+                sample_id=stable_sample_id_nextqa(video_id, str(row.get("question", "")), choices, answer_idx),
                 qid=str(row.get("qid", "")),
                 video_id=video_id,
                 video_path=video_path,
@@ -297,23 +257,6 @@ def _start_vllm_server(args: argparse.Namespace) -> subprocess.Popen[str]:
     return subprocess.Popen(cmd, env=env, stdout=server_stdout, stderr=server_stderr)
 
 
-def _stop_server(proc: subprocess.Popen[str]) -> None:
-    proc.terminate()
-    try:
-        proc.wait(timeout=10)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.wait(timeout=10)
-
-
-def _maybe_log_jsonl(path: str, record: dict[str, Any]) -> None:
-    if not path:
-        return
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    with open(path, "a", encoding="utf-8") as f:
-        f.write(json.dumps(record, ensure_ascii=False) + "\n")
-
-
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--model-path", required=True, help="HF model id or local snapshot path")
@@ -367,10 +310,10 @@ def main() -> int:
     try:
         if args.start_server:
             server_proc = _start_vllm_server(args)
-            _wait_port(args.host, args.port, timeout_s=args.server_timeout_s)
+            wait_port(args.host, args.port, timeout_s=args.server_timeout_s)
 
         base_url = f"http://{args.host}:{args.port}"
-        model_id = _get_model_id(base_url)
+        model_id = get_model_id(base_url)
 
         samples = _load_nextqa_samples(
             csv_path=args.csv,
@@ -470,7 +413,7 @@ def main() -> int:
                 if is_correct:
                     correct += 1
 
-                _maybe_log_jsonl(
+                maybe_log_jsonl(
                     args.log_jsonl,
                     {
                         "ts": time.time(),
@@ -489,7 +432,7 @@ def main() -> int:
                 )
             except Exception as e:
                 failed += 1
-                _maybe_log_jsonl(
+                maybe_log_jsonl(
                     args.log_jsonl,
                     {
                         "ts": time.time(),
@@ -597,7 +540,7 @@ def main() -> int:
         return 0
     finally:
         if server_proc is not None:
-            _stop_server(server_proc)
+            stop_server(server_proc)
 
 
 if __name__ == "__main__":

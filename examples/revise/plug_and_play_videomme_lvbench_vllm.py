@@ -3,16 +3,11 @@
 from __future__ import annotations
 
 import argparse
-import base64
-import hashlib
-import io
 import json
-import math
 import os
 import random
 import re
 import shutil
-import socket
 import subprocess
 import sys
 import time
@@ -24,286 +19,44 @@ import requests
 from datasets import load_dataset
 from PIL import Image
 
-try:
-    import wandb  # type: ignore
-except Exception:  # pragma: no cover
-    wandb = None
-
-
-_THINK_RE = re.compile(r"<think>(.*?)</think>", re.DOTALL | re.IGNORECASE)
-_SUMMARY_RE = re.compile(r"<summary>(.*?)</summary>", re.DOTALL | re.IGNORECASE)
-_FRAMES_RE = re.compile(r"<frames>(.*?)</frames>", re.DOTALL | re.IGNORECASE)
-_ANSWER_RE = re.compile(r"<answer>(.*?)</answer>", re.DOTALL | re.IGNORECASE)
-
-
-DEFAULT_SYSTEM_PROMPT_WITH_THINK = (
-    "You are REVISE, a multi-round video reasoning agent.\n"
-    "Each round you will see: (1) a multiple-choice question with options, (2) the current belief summary, "
-    "and (3) a few sampled video frames.\n"
-    "If you are confident, answer the question.\n"
-    "If you are NOT confident, request MORE video frames to view NEXT.\n"
-    "Frames are sampled at 1 fps; frame index ≈ timestamp in seconds.\n\n"
-    "IMPORTANT: Output must follow EXACTLY ONE of the two formats below. Do not output any text outside tags.\n"
-    "You MAY optionally include a <think>...</think> block, but it is NOT required.\n"
-    "Always include <summary> plus either <frames> (request) OR <answer> (final).\n"
-    "Do NOT output any other tags.\n\n"
-    "Format 1 — Request more frames (use this only if NOT confident):\n"
-    "<summary>P: ...; O: ...; H: ...; U: ...; R: request additional frames</summary>\n"
-    "<frames>1, 3</frames>\n\n"
-    "Format 2 — Answer now (use this if confident):\n"
-    "<summary>P: ...; O: ...; H: ...; U: ...; R: answered</summary>\n"
-    "<answer>B</answer>\n\n"
-    "Tag meanings:\n"
-    "- <think>: scratchpad reasoning for this round (will NOT be carried across rounds).\n"
-    "- <summary>: the ONLY persistent memory across rounds. Keep it short and update it EVERY round.\n"
-    "  The summary MUST be written in this exact order: P → O → H → U → R.\n"
-    "  - P (Previously seen): what was seen so far (describe content; do NOT list indices).\n"
-    "  - O (Observations): what you observe in the current frames.\n"
-    "  - H (Belief updates): updated belief based on evidence so far (do NOT include the final answer letter).\n"
-    "  - U (Uncertainties): what is still unknown or ambiguous.\n"
-    "  - R (Reasons): what evidence you need next (or 'answered').\n\n"
-    "Rules:\n"
-    "- Frame indices are 0-based in [0, L-1] and correspond to seconds on the 1-fps timeline.\n"
-    "- If requesting, choose 1 to {max_frames_per_round} NEW frames to view NEXT.\n"
-    "- Do NOT output any frame index from the Seen frames list; those are already viewed.\n"
-    "- When Candidate Frame IDs are provided, output those IDs (1..K) in <frames> instead of raw frame indices.\n"
-    "- In <frames>, output comma-separated integers only (no brackets, no text).\n"
-    "- In <answer>, output EXACTLY ONE option letter shown in the question (e.g., A/B/C/D/E). No words.\n"
+from examples.revise.pnp_prompts import SYSTEM_PROMPT_WITH_THINK as DEFAULT_SYSTEM_PROMPT_WITH_THINK
+from examples.revise.pnp_utils import (
+    ANSWER_RE,
+    FRAMES_RE,
+    SUMMARY_RE,
+    THINK_RE,
+    b64_jpeg,
+    collapse_ws,
+    dedupe_preserve_order,
+    extract_frames_1fps,
+    extract_tag,
+    extract_video_info,
+    format_question_block,
+    maybe_init_wandb,
+    maybe_log_jsonl,
+    normalize_answer_letter,
+    parse_int_list,
+    parse_options_from_lvbench_question,
+    parse_time_reference_range,
+    pick_free_port,
+    propose_candidate_frames,
+    sample_uniform_indices_inclusive,
+    shard_by_video,
+    stable_sample_id_dataset,
+    stop_server,
+    timeline_len_1fps,
+    wait_for_server,
+    wandb_log,
 )
 
 
-def _collapse_ws(text: str) -> str:
-    return re.sub(r"\s+", " ", str(text)).strip()
-
-
-def _extract_tag(text: str, pattern: re.Pattern[str]) -> Optional[str]:
-    matches = list(pattern.finditer(text or ""))
-    if not matches:
-        return None
-    return matches[-1].group(1).strip()
-
-
-def _parse_int_list(text: str) -> list[int]:
-    return [int(n) for n in re.findall(r"\d+", text or "")]
-
-
-def _dedupe_preserve_order(indices: list[int]) -> list[int]:
-    seen: set[int] = set()
-    out: list[int] = []
-    for idx in indices or []:
-        if idx in seen:
-            continue
-        seen.add(idx)
-        out.append(idx)
-    return out
-
-
-def _parse_time_to_seconds(text: str) -> Optional[float]:
-    raw = _collapse_ws(text)
-    if not raw:
-        return None
-    parts = [p for p in raw.split(":") if p]
-    if len(parts) == 2:
-        try:
-            mm = int(parts[0])
-            ss = float(parts[1])
-            return max(0.0, mm * 60.0 + ss)
-        except Exception:
-            return None
-    if len(parts) == 3:
-        try:
-            hh = int(parts[0])
-            mm = int(parts[1])
-            ss = float(parts[2])
-            return max(0.0, hh * 3600.0 + mm * 60.0 + ss)
-        except Exception:
-            return None
-    return None
-
-
-def _parse_time_reference_range(time_reference: str, timeline_len: int) -> Optional[tuple[int, int]]:
-    """Parse LVBench time_reference (e.g. '04:19-08:41') into a (start,end) range on the 1fps timeline."""
-    tr = _collapse_ws(time_reference)
-    if not tr or tr.lower() in {"n/a", "na", "none"}:
-        return None
-    if "-" not in tr:
-        return None
-    left, right = (s.strip() for s in tr.split("-", 1))
-    start_s = _parse_time_to_seconds(left)
-    end_s = _parse_time_to_seconds(right)
-    if start_s is None or end_s is None:
-        return None
-    if timeline_len <= 0:
-        return None
-
-    start = int(math.floor(start_s))
-    end = int(math.ceil(end_s))
-    if end < start:
-        start, end = end, start
-    start = max(0, min(start, timeline_len - 1))
-    end = max(0, min(end, timeline_len - 1))
-    if end < start:
-        return None
-    return start, end
-
-
-def _b64_jpeg(img: Image.Image) -> str:
-    # Qwen2.5-VL can exceed `max_model_len` when fed high-resolution frames (image token count depends on
-    # resolution/aspect ratio). Downscale to keep prompts within budget while still using real frames.
-    # Use a conservative max edge to reduce multimodal token count for multi-round evaluation.
-    max_edge = 384
-    try:
-        if img.mode != "RGB":
-            img = img.convert("RGB")
-        w, h = img.size
-        if max(w, h) > max_edge:
-            img = img.copy()
-            img.thumbnail((max_edge, max_edge), Image.LANCZOS)
-    except Exception:
-        pass
-    buf = io.BytesIO()
-    img.save(buf, format="JPEG", quality=85, optimize=True)
-    return base64.b64encode(buf.getvalue()).decode("utf-8")
-
-
-def _format_question_block(question: str, options: list[str]) -> str:
-    q = str(question).strip()
-    lines = ["Question: " + q, "Options:"]
-    letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-    for i, opt in enumerate(options):
-        prefix = letters[i] if i < len(letters) else str(i)
-        lines.append(f"{prefix}. {str(opt).strip()}")
-    return "\n".join(lines)
-
-
-def _normalize_answer_letter(ans: str, num_choices: int) -> Optional[str]:
-    letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-    if not ans:
-        return None
-    a = _collapse_ws(ans).strip().upper()
-    if len(a) == 1 and a in letters[: max(1, num_choices)]:
-        return a
-    m = re.search(r"\b([A-Z])\b", a)
-    if m:
-        cand = m.group(1)
-        if cand in letters[: max(1, num_choices)]:
-            return cand
-    return None
-
-
-def _stable_sample_id(dataset: str, video_key: str, uid: str) -> str:
-    payload = {"dataset": str(dataset), "video": str(video_key), "uid": str(uid)}
-    return hashlib.sha1(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
-
-
-def _sample_uniform_indices(frame_count: int, k: int) -> list[int]:
-    if frame_count <= 0 or k <= 0:
-        return []
-    if frame_count == 1:
-        return [0]
-    if k == 1:
-        return [frame_count // 2]
-    return [int(round(i)) for i in list(_linspace(0, frame_count - 1, k))]
-
-
-def _sample_uniform_indices_inclusive(start: int, end: int, k: int) -> list[int]:
-    if k <= 0:
-        return []
-    if end < start:
-        return []
-    if start == end:
-        return [start]
-    out = [int(round(i)) for i in _linspace(float(start), float(end), k)]
-    out = [max(start, min(i, end)) for i in out]
-    return _dedupe_preserve_order(out)
-
-
-def _linspace(a: float, b: float, n: int) -> list[float]:
-    if n <= 1:
-        return [a]
-    step = (b - a) / (n - 1)
-    return [a + i * step for i in range(n)]
-
-
-def _propose_candidate_frames(frame_count: int, seen: set[int], k: int, rng: random.Random) -> list[int]:
-    if frame_count <= 0 or k <= 0:
-        return []
-    if len(seen) >= frame_count:
-        return []
-
-    seen_sorted = sorted(i for i in seen if 0 <= i < frame_count)
-    anchors = sorted(set([0, frame_count - 1, *seen_sorted]))
-
-    candidates: list[int] = []
-    gaps: list[tuple[int, int, int]] = []
-    for a, b in zip(anchors, anchors[1:], strict=False):
-        if b - a <= 1:
-            continue
-        gaps.append((b - a, a, b))
-    gaps.sort(reverse=True)
-
-    for _, a, b in gaps:
-        mid = (a + b) // 2
-        for d in (0, -1, 1, -2, 2, -3, 3):
-            idx = mid + d
-            if a < idx < b and idx not in seen and idx not in candidates:
-                candidates.append(idx)
-                break
-        if len(candidates) >= k:
-            return sorted(candidates[:k])
-
-    need = k - len(candidates)
-    if need > 0:
-        remaining = [i for i in range(frame_count) if i not in seen and i not in candidates]
-        if remaining:
-            fill = rng.sample(remaining, k=min(need, len(remaining)))
-            candidates.extend(sorted(fill))
-
-    return sorted(candidates[:k])
-
-
-def _maybe_log_jsonl(path: Optional[str], obj: dict[str, Any]) -> None:
-    if not path:
-        return
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "a", encoding="utf-8") as f:
-        f.write(json.dumps(obj, ensure_ascii=False) + "\n")
-
-
-def _pick_free_port() -> int:
-    s = socket.socket()
-    s.bind(("127.0.0.1", 0))
-    _, port = s.getsockname()
-    s.close()
-    return int(port)
-
-
-def _port_is_open(host: str, port: int) -> bool:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.settimeout(0.5)
-        try:
-            return sock.connect_ex((host, port)) == 0
-        except Exception:
-            return False
-
-
-def _wait_for_server(host: str, port: int, timeout_s: int) -> None:
-    """Wait until the vLLM OpenAI server is actually ready.
-
-    vLLM can open the TCP port before the model is fully initialized; issuing a chat request too early can
-    return transient HTTP 400/503 errors. We poll the `/v1/models` endpoint to ensure readiness.
-    """
-    base_url = f"http://{host}:{port}"
-    start = time.time()
-    while time.time() - start < timeout_s:
-        try:
-            resp = requests.get(f"{base_url}/v1/models", timeout=1.0)
-            if resp.status_code == 200:
-                return
-        except Exception:
-            pass
-        time.sleep(0.5)
-    raise TimeoutError(f"vLLM server did not become ready at {host}:{port} within {timeout_s}s")
+def _retry_feedback_text(feedback: str, *, force_answer: bool) -> str:
+    if force_answer:
+        return (
+            f"{feedback}\n"
+            "You MUST answer now. Output <think>...</think> then <summary>...</summary> then <answer>LETTER</answer>."
+        )
+    return f"{feedback}\nPlease respond with one of the required formats."
 
 
 def _start_vllm_server(args: argparse.Namespace) -> subprocess.Popen[str]:
@@ -349,15 +102,6 @@ def _start_vllm_server(args: argparse.Namespace) -> subprocess.Popen[str]:
     return subprocess.Popen(cmd, env=env, stdout=stdout, stderr=stderr)
 
 
-def _stop_server(proc: subprocess.Popen[str]) -> None:
-    proc.terminate()
-    try:
-        proc.wait(timeout=10)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.wait(timeout=10)
-
-
 def _chat_once(
     base_url: str,
     model_id: str,
@@ -376,13 +120,13 @@ def _chat_once(
             if parts[i]:
                 content.append({"type": "text", "text": parts[i]})
             content.append(
-                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{_b64_jpeg(img)}"}}
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_jpeg(img, max_edge=384, quality=85)}"}}
             )
         if parts[-1]:
             content.append({"type": "text", "text": parts[-1]})
     else:
         for img in images:
-            content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{_b64_jpeg(img)}"}})
+            content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_jpeg(img, max_edge=384, quality=85)}"}})
         content.append({"type": "text", "text": user_text})
 
     payload = {
@@ -406,107 +150,6 @@ def _chat_once(
         raise RuntimeError(f"vLLM HTTP {resp.status_code}: {body}") from e
     data = resp.json()
     return data["choices"][0]["message"]["content"]
-
-
-def _maybe_init_wandb(args: argparse.Namespace, run_config: dict[str, Any]) -> Any:
-    if not getattr(args, "use_wandb", False) or wandb is None:
-        return None
-
-    def _has_wandb_credentials() -> bool:
-        if os.getenv("WANDB_API_KEY"):
-            return True
-        if os.getenv("WANDB_IDENTITY_TOKEN_FILE"):
-            return True
-        try:
-            from wandb.sdk.lib.wbauth import wbnetrc
-
-            base_url = os.getenv("WANDB_BASE_URL") or "https://api.wandb.ai"
-            return bool(wbnetrc.read_netrc_auth(host=base_url))
-        except Exception:
-            return False
-
-    mode = getattr(args, "wandb_mode", "") or os.getenv("WANDB_MODE")
-    if not mode:
-        mode = "online" if _has_wandb_credentials() else "offline"
-    if str(mode).lower() == "online" and not _has_wandb_credentials():
-        mode = "offline"
-
-    return wandb.init(
-        project=args.wandb_project,
-        entity=args.wandb_entity,
-        name=args.wandb_name,
-        group=args.wandb_group,
-        tags=args.wandb_tags.split(",") if args.wandb_tags else None,
-        mode=mode,
-        config=run_config,
-        reinit=True,
-    )
-
-
-def _wandb_log(run: Any, metrics: dict[str, Any], step: int) -> None:
-    if run is None or wandb is None:
-        return
-    wandb.log(metrics, step=step)
-
-
-def _retry_feedback_text(feedback: str, *, force_answer: bool) -> str:
-    if force_answer:
-        return (
-            f"{feedback}\n"
-            "You MUST answer now. Output <think>...</think> then <summary>...</summary> then <answer>LETTER</answer>."
-        )
-    return f"{feedback}\nPlease respond with one of the required formats."
-
-
-def _extract_video_info(video_path: str) -> tuple[int, float]:
-    """Return (total_frames, fps)."""
-    import decord
-
-    vr = decord.VideoReader(video_path, ctx=decord.cpu(0))
-    total_frames = int(len(vr))
-    fps = float(vr.get_avg_fps() or 0.0)
-    if fps <= 0:
-        # Conservative fallback (30fps).
-        fps = 30.0
-    return total_frames, fps
-
-
-def _timeline_len_1fps(total_frames: int, fps: float) -> int:
-    if total_frames <= 0:
-        return 0
-    duration_s = total_frames / max(1e-6, fps)
-    return max(1, int(math.ceil(duration_s)))
-
-
-def _timeline_to_frame_idx(timeline_idx: int, fps: float, total_frames: int) -> int:
-    if total_frames <= 0:
-        return 0
-    t = max(0.0, float(timeline_idx))
-    idx = int(t * fps)
-    return max(0, min(idx, total_frames - 1))
-
-
-def _extract_frames_1fps(video_path: str, timeline_indices: list[int]) -> list[Image.Image]:
-    if not timeline_indices:
-        return []
-    import decord
-
-    vr = decord.VideoReader(video_path, ctx=decord.cpu(0))
-    total_frames = int(len(vr))
-    fps = float(vr.get_avg_fps() or 0.0)
-    if fps <= 0:
-        fps = 30.0
-
-    frame_indices = [_timeline_to_frame_idx(i, fps, total_frames) for i in timeline_indices]
-    try:
-        frames = vr.get_batch(frame_indices).asnumpy()
-        return [Image.fromarray(frame) for frame in frames]
-    except Exception:
-        # Fallback to per-frame reads.
-        out: list[Image.Image] = []
-        for idx in frame_indices:
-            out.append(Image.fromarray(vr[idx].asnumpy()))
-        return out
 
 
 def _ensure_yt_dlp(py_bin: str) -> list[str]:
@@ -571,31 +214,7 @@ class MCVideoSample:
 
     @property
     def sample_id(self) -> str:
-        return _stable_sample_id(self.dataset, self.video_key, self.uid)
-
-
-def _parse_options_from_lvbench_question(question: str) -> tuple[str, list[str]]:
-    text = str(question or "").strip()
-    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-    if not lines:
-        return "", []
-
-    opt_re = re.compile(r"^\(([A-Z])\)\s*(.*)$")
-    q_lines: list[str] = []
-    opts: dict[str, str] = {}
-    for ln in lines:
-        m = opt_re.match(ln)
-        if m:
-            opts[m.group(1)] = m.group(2).strip()
-        else:
-            q_lines.append(ln)
-
-    q_text = " ".join(q_lines).strip()
-    if not opts:
-        return q_text, []
-    letters_sorted = sorted(opts.keys())
-    options = [opts[k] for k in letters_sorted]
-    return q_text, options
+        return stable_sample_id_dataset(self.dataset, self.video_key, self.uid)
 
 
 def _load_videomme_samples(split: str) -> list[MCVideoSample]:
@@ -618,7 +237,7 @@ def _load_videomme_samples(split: str) -> list[MCVideoSample]:
         samples.append(
             MCVideoSample(
                 dataset="videomme",
-                uid=qid or _stable_sample_id("videomme", video_id, question),
+                uid=qid or stable_sample_id_dataset("videomme", video_id, question),
                 video_key=f"{video_id}.mp4",
                 video_url=url,
                 question=question,
@@ -636,7 +255,7 @@ def _load_lvbench_samples(split: str) -> list[MCVideoSample]:
         video_path = str(ex.get("video_path") or "").strip()
         uid = str(ex.get("uid") or ex.get("key") or "").strip()
         q_raw = str(ex.get("question") or "").strip()
-        q_text, options = _parse_options_from_lvbench_question(q_raw)
+        q_text, options = parse_options_from_lvbench_question(q_raw)
         answer = str(ex.get("answer") or "").strip().upper()
         time_reference = str(ex.get("time_reference") or "").strip()
         video_id = Path(video_path).stem
@@ -644,7 +263,7 @@ def _load_lvbench_samples(split: str) -> list[MCVideoSample]:
         samples.append(
             MCVideoSample(
                 dataset="lvbench",
-                uid=uid or _stable_sample_id("lvbench", video_path, q_raw),
+                uid=uid or stable_sample_id_dataset("lvbench", video_path, q_raw),
                 video_key=video_path,
                 video_url=url,
                 question=q_text if q_text else q_raw,
@@ -654,26 +273,6 @@ def _load_lvbench_samples(split: str) -> list[MCVideoSample]:
             )
         )
     return samples
-
-
-def _shard_by_video(samples: list[MCVideoSample], num_shards: int, shard_idx: int) -> list[MCVideoSample]:
-    if num_shards <= 1:
-        return samples
-    if not (0 <= shard_idx < num_shards):
-        raise ValueError(f"--shard-idx must be in [0, {num_shards}) (got {shard_idx})")
-
-    by_video: dict[str, list[MCVideoSample]] = {}
-    for s in samples:
-        by_video.setdefault(s.video_key, []).append(s)
-    video_keys = sorted(by_video.keys())
-    my_videos = {vk for i, vk in enumerate(video_keys) if (i % num_shards) == shard_idx}
-
-    out: list[MCVideoSample] = []
-    for vk in video_keys:
-        if vk not in my_videos:
-            continue
-        out.extend(by_video[vk])
-    return out
 
 
 def _build_user_text(
@@ -793,7 +392,7 @@ def main() -> None:
     args = ap.parse_args()
 
     if args.port <= 0:
-        args.port = _pick_free_port()
+        args.port = pick_free_port()
 
     split = args.split
     if not split:
@@ -823,7 +422,7 @@ def main() -> None:
     if args.max_samples > 0:
         samples = samples[: args.max_samples]
 
-    samples = _shard_by_video(samples, args.num_shards, args.shard_idx)
+    samples = shard_by_video(samples, args.num_shards, args.shard_idx)
 
     # Stable order to improve download locality.
     samples.sort(key=lambda s: (s.video_key, s.uid))
@@ -881,7 +480,7 @@ def main() -> None:
     server_proc: Optional[subprocess.Popen[str]] = None
     if args.start_server:
         server_proc = _start_vllm_server(args)
-        _wait_for_server(args.host, args.port, timeout_s=240)
+        wait_for_server(args.host, args.port, timeout_s=240)
 
     run_config = {
         "task": "revise_plug_and_play_videomme_lvbench_vllm",
@@ -909,7 +508,7 @@ def main() -> None:
         "log_jsonl": args.log_jsonl,
         "summary_json": args.summary_json,
     }
-    run = _maybe_init_wandb(args, run_config)
+    run = maybe_init_wandb(args, run_config)
 
     base_url = f"http://{args.host}:{args.port}"
     model_id = args.model_path
@@ -941,7 +540,7 @@ def main() -> None:
         # across many questions from the same video.
         if not video_ok and os.path.exists(failed_marker):
             failed += 1
-            _maybe_log_jsonl(
+            maybe_log_jsonl(
                 args.log_jsonl,
                 {
                     "ts": time.time(),
@@ -966,7 +565,7 @@ def main() -> None:
                         f.write(f"download_failed: {type(e).__name__}: {str(e)}\n")
                 except Exception:
                     pass
-                _maybe_log_jsonl(
+                maybe_log_jsonl(
                     args.log_jsonl,
                     {
                         "ts": time.time(),
@@ -982,11 +581,11 @@ def main() -> None:
                 return
 
         try:
-            total_frames, fps = _extract_video_info(video_path)
-            timeline_len = _timeline_len_1fps(total_frames, fps)
+            total_frames, fps = extract_video_info(video_path)
+            tl_len = timeline_len_1fps(total_frames, fps)
         except Exception as e:
             failed += 1
-            _maybe_log_jsonl(
+            maybe_log_jsonl(
                 args.log_jsonl,
                 {
                     "ts": time.time(),
@@ -1001,7 +600,7 @@ def main() -> None:
             )
             return
 
-        if timeline_len <= 0:
+        if tl_len <= 0:
             failed += 1
             return
 
@@ -1009,13 +608,13 @@ def main() -> None:
         # We bias/scope frame sampling to this window to avoid spending rounds on irrelevant frames.
         time_range = None
         if sample.dataset == "lvbench" and sample.time_reference:
-            time_range = _parse_time_reference_range(sample.time_reference, timeline_len)
+            time_range = parse_time_reference_range(sample.time_reference, tl_len)
         if time_range is None:
-            range_start, range_end = 0, timeline_len - 1
+            range_start, range_end = 0, tl_len - 1
         else:
             range_start, range_end = time_range
 
-        question_block = _format_question_block(sample.question, sample.options)
+        question_block = format_question_block(sample.question, sample.options)
         summary_state = (
             "P: the agent has not seen any frames yet; "
             "O: no reliable observation yet; "
@@ -1028,13 +627,13 @@ def main() -> None:
         effective_rounds = 0
         terminated_invalid = False
 
-        init_frames = _sample_uniform_indices_inclusive(range_start, range_end, args.max_frames_per_round)
+        init_frames = sample_uniform_indices_inclusive(range_start, range_end, args.max_frames_per_round)
         next_frames = [int(i) for i in init_frames if i >= 0]
 
         for round_idx in range(1, args.max_rounds + 1):
             frames_this_round = [i for i in next_frames if i not in seen_frames]
             if not frames_this_round:
-                frames_this_round = _sample_uniform_indices_inclusive(range_start, range_end, 1)
+                frames_this_round = sample_uniform_indices_inclusive(range_start, range_end, 1)
             frames_this_round = frames_this_round[: args.max_frames_per_round]
             for i in frames_this_round:
                 if i not in seen_frames:
@@ -1046,7 +645,7 @@ def main() -> None:
                 candidate_next_frames = []
             else:
                 seen_local = {int(i - range_start) for i in seen_frames if range_start <= i <= range_end}
-                cand_local = _propose_candidate_frames(
+                cand_local = propose_candidate_frames(
                     frame_count=local_len,
                     seen=seen_local,
                     k=int(args.candidate_k),
@@ -1054,11 +653,11 @@ def main() -> None:
                 )
                 candidate_next_frames = [int(i + range_start) for i in cand_local]
 
-            images = _extract_frames_1fps(video_path, frames_this_round)
+            images = extract_frames_1fps(video_path, frames_this_round)
             user_text = _build_user_text(
                 question_block=question_block,
                 summary=summary_state,
-                timeline_len=timeline_len,
+                timeline_len=tl_len,
                 round_idx=round_idx,
                 current_frames=frames_this_round,
                 seen_frames=seen_frames,
@@ -1097,15 +696,15 @@ def main() -> None:
                     err_txt = f"{type(e).__name__}: {str(e)[:400]}"
                     if args.restart_server_on_failure and args.start_server:
                         if server_proc is not None:
-                            _stop_server(server_proc)
+                            stop_server(server_proc)
                         server_proc = _start_vllm_server(args)
-                        _wait_for_server(args.host, args.port, timeout_s=240)
+                        wait_for_server(args.host, args.port, timeout_s=240)
                         retry_feedback = f"Server error; please retry. ({err_txt})"
                         total_retries += 1
                         if retry_idx < args.max_retries_per_round:
                             continue
                     failed += 1
-                    _maybe_log_jsonl(
+                    maybe_log_jsonl(
                         args.log_jsonl,
                         {
                             "ts": time.time(),
@@ -1122,13 +721,13 @@ def main() -> None:
                     )
                     return
 
-                think = _extract_tag(raw_output, _THINK_RE)
+                think = extract_tag(raw_output, THINK_RE)
                 if think is not None:
                     think_present += 1
 
-                summary_out = _extract_tag(raw_output, _SUMMARY_RE)
-                frames_text = _extract_tag(raw_output, _FRAMES_RE)
-                answer_tag = _extract_tag(raw_output, _ANSWER_RE)
+                summary_out = extract_tag(raw_output, SUMMARY_RE)
+                frames_text = extract_tag(raw_output, FRAMES_RE)
+                answer_tag = extract_tag(raw_output, ANSWER_RE)
 
                 if summary_out is None:
                     # Some models may omit <summary>. Keep previous summary state and proceed if we can still parse
@@ -1149,13 +748,13 @@ def main() -> None:
                             tail = (raw_output or "")[m_end:]
                     except Exception:
                         tail = raw_output or ""
-                    tail = _collapse_ws(tail)
+                    tail = collapse_ws(tail)
                     if 0 < len(tail) <= 32:
                         toks = tail.split()
                         answer_candidate_text = toks[-1] if toks else tail
 
                 if answer_candidate_text is not None:
-                    letter = _normalize_answer_letter(answer_candidate_text, len(sample.options))
+                    letter = normalize_answer_letter(answer_candidate_text, len(sample.options))
                     if letter is not None:
                         answer_letter = letter
                         summary_state = summary_out
@@ -1166,7 +765,7 @@ def main() -> None:
                         total_retries += 1
                         continue
 
-                requested = _dedupe_preserve_order(_parse_int_list(frames_text))
+                requested = dedupe_preserve_order(parse_int_list(frames_text))
                 if not requested:
                     if frames_text is None:
                         # Recover if the model output candidate IDs but forgot the <frames> tag.
@@ -1179,7 +778,7 @@ def main() -> None:
                                 tail = (raw_output or "")[m_end:]
                         except Exception:
                             tail = raw_output or ""
-                        requested = _dedupe_preserve_order(_parse_int_list(tail))
+                        requested = dedupe_preserve_order(parse_int_list(tail))
 
                 if not requested:
                     retry_feedback = (
@@ -1230,7 +829,7 @@ def main() -> None:
                 summary_state = summary_out
                 break
 
-            _maybe_log_jsonl(
+            maybe_log_jsonl(
                 args.log_jsonl,
                 {
                     "ts": time.time(),
@@ -1241,7 +840,7 @@ def main() -> None:
                     "video_key": sample.video_key,
                     "video_url": sample.video_url,
                     "video_path": video_path,
-                    "timeline_len": timeline_len,
+                    "timeline_len": tl_len,
                     "round_idx": round_idx,
                     "retry_feedback": retry_feedback,
                     "question": sample.question,
@@ -1263,14 +862,14 @@ def main() -> None:
                 answered += 1
                 total_rounds += round_idx
                 total_effective_rounds += effective_rounds
-                gt = _normalize_answer_letter(sample.answer_letter, len(sample.options))
+                gt = normalize_answer_letter(sample.answer_letter, len(sample.options))
                 if gt is not None and answer_letter == gt:
                     correct += 1
                 return
 
         # If we still have no answer, force one extra call (answer-only).
         if answer_letter is None and args.force_final_answer:
-            images = _extract_frames_1fps(video_path, frames_this_round)
+            images = extract_frames_1fps(video_path, frames_this_round)
             user_text2 = (
                 f"{question_block}\n"
                 "You MUST answer now. Output <think>...</think> then <summary>...</summary> then <answer>LETTER</answer>."
@@ -1289,7 +888,7 @@ def main() -> None:
                 )
             except Exception as e:
                 failed += 1
-                _maybe_log_jsonl(
+                maybe_log_jsonl(
                     args.log_jsonl,
                     {
                         "ts": time.time(),
@@ -1306,9 +905,9 @@ def main() -> None:
                 )
                 return
             total_model_calls += 1
-            ans = _extract_tag(raw, _ANSWER_RE)
-            summary = _extract_tag(raw, _SUMMARY_RE)
-            letter = _normalize_answer_letter(ans or "", len(sample.options))
+            ans = extract_tag(raw, ANSWER_RE)
+            summary = extract_tag(raw, SUMMARY_RE)
+            letter = normalize_answer_letter(ans or "", len(sample.options))
             if letter is not None:
                 answer_letter = letter
                 frames_used = len(seen_frames)
@@ -1317,7 +916,7 @@ def main() -> None:
                 answered += 1
                 total_rounds += args.max_rounds
                 total_effective_rounds += effective_rounds
-                gt = _normalize_answer_letter(sample.answer_letter, len(sample.options))
+                gt = normalize_answer_letter(sample.answer_letter, len(sample.options))
                 if gt is not None and answer_letter == gt:
                     correct += 1
             else:
@@ -1341,7 +940,7 @@ def main() -> None:
                 f"elapsed_s={time.time()-start_t:.1f}",
                 flush=True,
             )
-            _wandb_log(
+            wandb_log(
                 run,
                 {
                     "eval/acc": acc,
@@ -1440,7 +1039,7 @@ def main() -> None:
             )
 
     if server_proc is not None and args.start_server:
-        _stop_server(server_proc)
+        stop_server(server_proc)
 
 
 if __name__ == "__main__":

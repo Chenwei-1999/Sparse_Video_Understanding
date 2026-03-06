@@ -3,15 +3,12 @@
 from __future__ import annotations
 
 import argparse
-import base64
 import hashlib
-import io
 import json
 import os
 import random
 import re
 import shutil
-import socket
 import subprocess
 import sys
 import time
@@ -26,239 +23,34 @@ try:
 except Exception:  # pragma: no cover
     wandb = None
 
-
-_SUMMARY_RE = re.compile(r"<summary>(.*?)</summary>", re.DOTALL | re.IGNORECASE)
-_FRAMES_RE = re.compile(r"<frames>(.*?)</frames>", re.DOTALL | re.IGNORECASE)
-_ANSWER_RE = re.compile(r"<answer>(.*?)</answer>", re.DOTALL | re.IGNORECASE)
-_THINK_RE = re.compile(r"<think>(.*?)</think>", re.DOTALL | re.IGNORECASE)
-
-
-DEFAULT_SYSTEM_PROMPT = (
-    "You are REVISE, a multi-round video reasoning agent.\n"
-    "Each round you will see: (1) a multiple-choice question with options, (2) the current belief summary, "
-    "and (3) a few sampled video frames.\n"
-    "If you are confident, answer the question.\n"
-    "If you are NOT confident, request MORE video frames to view NEXT.\n"
-    "Frames are sampled at ~1 fps; frame index ≈ timestamp in seconds.\n\n"
-    "IMPORTANT: Output must follow EXACTLY ONE of the two formats below. Do not output any text outside tags.\n"
-    "Output ONLY <summary> plus either <frames> (request) OR <answer> (final).\n"
-    "Do NOT output <think>.\n"
-    "Do NOT output bare placeholders like '...', 'none', or 'N/A' as your summary fields.\n"
-    "It's OK to say something is unclear/unknown *within a sentence*, but do not leave fields empty.\n\n"
-    "Format 1 — Request more frames (use this only if NOT confident):\n"
-    "<summary>P: previously seen frames show a person in the scene interacting with objects; "
-    "O: I observe an action that may be relevant to the question; "
-    "H: based on the evidence so far, my belief is updated but still incomplete; "
-    "U: a key detail needed to answer is still unclear; "
-    "R: request additional frames to gather the missing evidence</summary>\n"
-    "<frames>1, 3</frames>\n\n"
-    "If Candidate Frame IDs are provided in the user prompt, request using those IDs (e.g., <frames>1, 3</frames>).\n\n"
-    "Format 2 — Answer now (use this if confident):\n"
-    "<summary>P: previously seen frames already contain the key evidence; "
-    "O: the answer-relevant evidence is visible in the shown frames; "
-    "H: my belief is updated based on the observed evidence; "
-    "U: no remaining ambiguity that affects the answer; "
-    "R: answered</summary>\n"
-    "<answer>B</answer>\n\n"
-    "Tag meanings:\n"
-    "- <summary>: the ONLY persistent memory across rounds. Keep it short and update it EVERY round.\n"
-    "  The summary MUST be written in this exact order: P → O → H → U → R.\n"
-    "  - P (Previously seen): which frames have already been used/seen (write as a sentence; no Python lists).\n"
-    "  - O (Observations): what you currently observe in the selected frames.\n"
-    "  - H (Belief updates): updated belief based on what has been observed so far (do NOT include the final answer letter).\n"
-    "  - U (Uncertainties): what is still unknown or ambiguous.\n"
-    "  - R (Reasons): why you need more frames and what evidence you are looking for next (or 'answered').\n\n"
-    "Rules:\n"
-    "- Frame indices are 0-based in [0, L-1].\n"
-    "- If you are confident, answer instead of requesting more frames.\n"
-    "- If requesting, choose 1 to {max_frames_per_round} NEW frames to view NEXT.\n"
-    "- Do NOT output any frame index from the Seen frames list; those are already viewed.\n"
-    "- When provided, request frames ONLY within the allowed unseen frame ranges.\n"
-    "- When Candidate Frame IDs are provided, output those IDs (1..K) in <frames> instead of raw frame indices.\n"
-    "- In <frames>, output comma-separated integers only (no brackets, no text).\n"
-    "- In <summary>, include P/O/H/U/R as short natural-language sentences that reflect your current understanding.\n"
-    "- The order inside <summary> MUST be: P then O then H then U then R.\n"
-    "- In P, describe previously seen frames in a sentence (describe content; do NOT list frame indices or use Python lists like [4, 8, 12]).\n"
-    "- In <answer>, output EXACTLY ONE option letter shown in the question (e.g., A/B/C/D/E). No words/punctuation.\n"
-    "- Never copy the example text; replace it with information from the current video.\n"
+from examples.revise.pnp_prompts import SYSTEM_PROMPT as DEFAULT_SYSTEM_PROMPT
+from examples.revise.pnp_utils import (
+    ANSWER_RE,
+    FRAMES_RE,
+    SUMMARY_RE,
+    THINK_RE,
+    b64_jpeg,
+    collapse_ws,
+    contains_banned_example,
+    dedupe_preserve_order,
+    extract_frames,
+    extract_tag,
+    format_intervals,
+    format_frame_list,
+    get_model_id,
+    in_intervals,
+    indices_to_intervals,
+    is_placeholder,
+    maybe_init_wandb,
+    normalize_answer_letter,
+    parse_int_list,
+    propose_candidate_frames,
+    sample_uniform_indices,
+    stop_server,
+    summary_has_ohrpu,
+    unseen_intervals,
+    wait_port,
 )
-
-
-def _collapse_ws(text: str) -> str:
-    return re.sub(r"\s+", " ", str(text)).strip()
-
-
-def _contains_banned_example(text: str) -> bool:
-    t = _collapse_ws(text).lower()
-    if not t:
-        return False
-    if "george approaching a shelf" in t:
-        return True
-    if "george pauses" in t and "shelf" in t:
-        return True
-    return False
-
-
-def _extract_tag(text: str, pattern: re.Pattern[str]) -> Optional[str]:
-    matches = list(pattern.finditer(text or ""))
-    if not matches:
-        return None
-    return matches[-1].group(1).strip()
-
-
-def _parse_frame_indices(text: str) -> list[int]:
-    return [int(n) for n in re.findall(r"\d+", text or "")]
-
-
-def _dedupe_preserve_order(indices: list[int]) -> list[int]:
-    seen: set[int] = set()
-    out: list[int] = []
-    for idx in indices or []:
-        if idx in seen:
-            continue
-        seen.add(idx)
-        out.append(idx)
-    return out
-
-
-def _normalize_answer_letter(answer_text: str, num_choices: int) -> Optional[str]:
-    allowed = {chr(ord("A") + i) for i in range(max(0, num_choices))}
-    if not allowed:
-        allowed = {"A", "B", "C", "D", "E"}
-    candidate = str(answer_text).strip().upper()
-    if candidate in allowed:
-        return candidate
-    m = re.search(r"\b([A-E])\b", candidate)
-    if m:
-        letter = m.group(1).upper()
-        return letter if letter in allowed else None
-    m = re.search(r"([A-E])", candidate)
-    if m:
-        letter = m.group(1).upper()
-        return letter if letter in allowed else None
-    return None
-
-
-def _summary_has_ohrpu(summary: str) -> bool:
-    if summary is None:
-        return False
-    s = _collapse_ws(summary)
-    order = ["P", "O", "H", "U", "R"]
-    positions = []
-    for key in order:
-        m = re.search(rf"\b{key}\s*:\s*", s, re.IGNORECASE)
-        if m is None:
-            return False
-        positions.append(m.start())
-    return all(a < b for a, b in zip(positions, positions[1:], strict=False))
-
-
-def _is_placeholder(text: str) -> bool:
-    t = _collapse_ws(text).lower()
-    if not t:
-        return True
-    if "..." in t or "…" in t:
-        return True
-    if t in {"...", "…", "none", "n/a", "na", "null", "unknown", "unsure", "uncertain"}:
-        return True
-    if re.fullmatch(r"[.·•…]+", t):
-        return True
-    alnum = re.findall(r"[a-z0-9]+", t)
-    if len(alnum) <= 1 and len(t) <= 6:
-        return True
-    return False
-
-
-def _sample_uniform_indices(frame_count: int, n: int) -> list[int]:
-    if n <= 0:
-        return []
-    if frame_count <= 0:
-        return [0]
-    if n == 1:
-        return [frame_count // 2]
-    if frame_count == 1:
-        return [0]
-    return [round(i * (frame_count - 1) / (n - 1)) for i in range(n)]
-
-
-def _unseen_intervals(frame_count: int, seen_frames: list[int]) -> list[tuple[int, int]]:
-    if frame_count <= 0:
-        return [(0, 0)]
-    seen = sorted({int(i) for i in (seen_frames or []) if 0 <= int(i) < frame_count})
-    anchors = [-1, *seen, frame_count]
-    intervals: list[tuple[int, int]] = []
-    for a, b in zip(anchors, anchors[1:], strict=False):
-        start = a + 1
-        end = b - 1
-        if start <= end:
-            intervals.append((start, end))
-    return intervals if intervals else [(0, frame_count - 1)]
-
-
-def _format_intervals(intervals: list[tuple[int, int]]) -> str:
-    out: list[str] = []
-    for a, b in intervals:
-        out.append(str(a) if a == b else f"{a}-{b}")
-    return ", ".join(out) if out else ""
-
-
-def _format_frame_list(frames: list[int]) -> str:
-    f = [int(x) for x in (frames or [])]
-    if not f:
-        return "(none)"
-    if len(f) > 25:
-        return ", ".join([str(x) for x in f[:25]]) + f", ... (+{len(f) - 25} more)"
-    return ", ".join(str(x) for x in f)
-
-
-def _indices_to_intervals(indices: list[int]) -> list[tuple[int, int]]:
-    ids = sorted({int(i) for i in (indices or [])})
-    if not ids:
-        return []
-    out: list[tuple[int, int]] = []
-    start = prev = ids[0]
-    for x in ids[1:]:
-        if x == prev + 1:
-            prev = x
-            continue
-        out.append((start, prev))
-        start = prev = x
-    out.append((start, prev))
-    return out
-
-
-def _in_intervals(x: int, intervals: list[tuple[int, int]]) -> bool:
-    for a, b in intervals:
-        if a <= x <= b:
-            return True
-    return False
-
-
-def _b64_jpeg(img: Image.Image) -> str:
-    buf = io.BytesIO()
-    img.save(buf, format="JPEG", quality=90)
-    return base64.b64encode(buf.getvalue()).decode("utf-8")
-
-
-def _wait_port(host: str, port: int, timeout_s: int = 300) -> None:
-    start = time.time()
-    while time.time() - start < timeout_s:
-        try:
-            with socket.create_connection((host, port), timeout=1.0):
-                return
-        except OSError:
-            time.sleep(1)
-    raise TimeoutError(f"Timed out waiting for {host}:{port} after {timeout_s}s")
-
-
-def _get_model_id(base_url: str, timeout: int = 30) -> str:
-    resp = requests.get(f"{base_url}/v1/models", timeout=timeout)
-    resp.raise_for_status()
-    data = resp.json()
-    models = data.get("data", [])
-    if not models:
-        raise RuntimeError(f"No models returned from {base_url}/v1/models")
-    return models[0]["id"]
 
 
 def _normalize_option_text(opt: str) -> str:
@@ -301,7 +93,7 @@ def _build_user_text(
             "(do NOT request any previously shown frames; follow the selection constraints below)."
         )
     else:
-        lines.append(f"Seen frames (already viewed; do NOT request these again): {_format_frame_list(seen_frames)}")
+        lines.append(f"Seen frames (already viewed; do NOT request these again): {format_frame_list(seen_frames)}")
 
     if candidate_unseen_frames and use_candidate_frame_ids:
         lines.append(
@@ -314,7 +106,7 @@ def _build_user_text(
     else:
         lines.append(
             "Allowed unseen frame ranges for <frames> (choose NEW indices only from these ranges): "
-            f"{_format_intervals(_unseen_intervals(frame_count, seen_frames))}"
+            f"{format_intervals(unseen_intervals(frame_count, seen_frames))}"
         )
         if candidate_unseen_frames:
             prefix = (
@@ -322,7 +114,7 @@ def _build_user_text(
                 if require_candidate_frames
                 else "Candidate unseen frame ranges to request (optional, all NEW): "
             )
-            lines.append(prefix + f"{_format_intervals(_indices_to_intervals(candidate_unseen_frames))}")
+            lines.append(prefix + f"{format_intervals(indices_to_intervals(candidate_unseen_frames))}")
             if require_candidate_frames:
                 lines.append("In <frames>, output ONLY indices within the Candidate unseen frame ranges above.")
     lines.extend(["Current summary:", f"<summary>{summary}</summary>", "Frames shown in this round:"])
@@ -336,26 +128,6 @@ def _build_user_text(
     return "\n".join(lines)
 
 
-def _extract_frames(video_path: str, frame_indices: list[int]) -> list[Image.Image]:
-    if not frame_indices:
-        return []
-    try:
-        import decord
-
-        vr = decord.VideoReader(video_path, ctx=decord.cpu(0))
-        frames = vr.get_batch(frame_indices).asnumpy()
-        return [Image.fromarray(frame) for frame in frames]
-    except Exception:
-        pass
-    import imageio
-
-    reader = imageio.get_reader(video_path, "ffmpeg")
-    try:
-        return [Image.fromarray(reader.get_data(idx)) for idx in frame_indices]
-    finally:
-        reader.close()
-
-
 def _sample_unseen_frames(frame_count: int, seen: set[int], k: int, rng: random.Random) -> list[int]:
     if frame_count <= 0 or k <= 0:
         return []
@@ -363,30 +135,6 @@ def _sample_unseen_frames(frame_count: int, seen: set[int], k: int, rng: random.
         return []
     candidates = [i for i in range(frame_count) if i not in seen]
     rng.shuffle(candidates)
-    return sorted(candidates[:k])
-
-
-def _propose_candidate_unseen_frames(frame_count: int, seen: set[int], k: int, rng: random.Random) -> list[int]:
-    if frame_count <= 0 or k <= 0:
-        return []
-    if len(seen) >= frame_count:
-        return []
-    seen_sorted = sorted(i for i in seen if 0 <= i < frame_count)
-    anchors = sorted(set([0, frame_count - 1, *seen_sorted]))
-    # Prefer sampling near "gaps" between seen frames to encourage covering new evidence.
-    candidates: list[int] = []
-    for a, b in zip(anchors, anchors[1:], strict=False):
-        gap = max(0, b - a - 1)
-        if gap <= 0:
-            continue
-        mid = a + 1 + gap // 2
-        candidates.append(mid)
-    candidates = [c for c in candidates if c not in seen and 0 <= c < frame_count]
-    # Fill remaining with random unseen.
-    if len(candidates) < k:
-        remaining = [i for i in range(frame_count) if i not in seen and i not in candidates]
-        rng.shuffle(remaining)
-        candidates.extend(remaining[: max(0, k - len(candidates))])
     return sorted(candidates[:k])
 
 
@@ -456,48 +204,14 @@ def _start_vllm_server(args: argparse.Namespace) -> subprocess.Popen[str]:
     return subprocess.Popen(cmd, env=env, stdout=server_stdout, stderr=server_stderr)
 
 
-def _stop_server(proc: subprocess.Popen[str]) -> None:
-    proc.terminate()
-    try:
-        proc.wait(timeout=10)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.wait(timeout=10)
-
-
-def _wandb_init(args: argparse.Namespace, summary: dict[str, Any]) -> Any:
-    if not args.use_wandb or wandb is None:
-        return None
-
-    def _has_wandb_credentials() -> bool:
-        if os.getenv("WANDB_API_KEY"):
-            return True
-        if os.getenv("WANDB_IDENTITY_TOKEN_FILE"):
-            return True
-        try:
-            from wandb.sdk.lib.wbauth import wbnetrc  # type: ignore
-
-            base_url = os.getenv("WANDB_BASE_URL") or "https://api.wandb.ai"
-            return bool(wbnetrc.read_netrc_auth(host=base_url))
-        except Exception:
-            return False
-
-    mode = (args.wandb_mode or os.getenv("WANDB_MODE") or "").strip()
-    if not mode:
-        mode = "online" if _has_wandb_credentials() else "offline"
-    if mode.lower() == "online" and not _has_wandb_credentials():
-        mode = "offline"
-
-    return wandb.init(
-        project=args.wandb_project or "revise_egoschema",
-        entity=args.wandb_entity,
-        name=args.wandb_name,
-        group=args.wandb_group,
-        tags=(args.wandb_tags.split(",") if args.wandb_tags else None),
-        mode=mode,
-        config=summary,
-        reinit=True,
-    )
+def _stable_sample_id(video_path: str, question: str, choices: list[str], answer_idx: int) -> str:
+    payload = {
+        "video_path": str(video_path),
+        "question": str(question),
+        "choices": [str(c) for c in (choices or [])],
+        "answer_idx": int(answer_idx),
+    }
+    return hashlib.sha1(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
 
 
 @dataclass
@@ -509,16 +223,6 @@ class EgoSchemaSample:
     choices: list[str]
     answer_idx: int
     frame_count: int
-
-
-def _stable_sample_id(video_path: str, question: str, choices: list[str], answer_idx: int) -> str:
-    payload = {
-        "video_path": str(video_path),
-        "question": str(question),
-        "choices": [str(c) for c in (choices or [])],
-        "answer_idx": int(answer_idx),
-    }
-    return hashlib.sha1(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
 
 
 def _load_egoschema_samples(
@@ -715,7 +419,7 @@ def main() -> int:
         "hide_seen_frames_in_prompt": bool(args.hide_seen_frames_in_prompt),
     }
 
-    wandb_run = _wandb_init(args, summary)
+    wandb_run = maybe_init_wandb(args, summary)
 
     server_proc: Optional[subprocess.Popen[str]] = None
     base_url = f"http://{args.host}:{args.port}"
@@ -725,20 +429,20 @@ def main() -> int:
         nonlocal server_proc, model_id
         if args.start_server and server_proc is None:
             server_proc = _start_vllm_server(args)
-            _wait_port(args.host, args.port, timeout_s=args.server_timeout_s)
+            wait_port(args.host, args.port, timeout_s=args.server_timeout_s)
         if model_id is None:
-            model_id = _get_model_id(base_url)
+            model_id = get_model_id(base_url)
 
     def _restart_server() -> None:
         nonlocal server_proc, model_id
         if server_proc is not None:
-            _stop_server(server_proc)
+            stop_server(server_proc)
             server_proc = None
             model_id = None
         if args.start_server:
             server_proc = _start_vllm_server(args)
-            _wait_port(args.host, args.port, timeout_s=args.server_timeout_s)
-            model_id = _get_model_id(base_url)
+            wait_port(args.host, args.port, timeout_s=args.server_timeout_s)
+            model_id = get_model_id(base_url)
 
     # Resume logic
     done_ids: set[str] = set()
@@ -790,16 +494,16 @@ def main() -> int:
             except Exception:
                 frame_count = 0
 
-        init_frames = _sample_uniform_indices(frame_count, args.max_frames_per_round)
+        init_frames = sample_uniform_indices(frame_count, args.max_frames_per_round)
 
         for round_idx in range(1, args.max_rounds + 1):
             if round_idx == 1:
                 frames_this_round = init_frames
             else:
                 if not frames_this_round:
-                    frames_this_round = _sample_uniform_indices(frame_count, 1)
+                    frames_this_round = sample_uniform_indices(frame_count, 1)
 
-            images = _extract_frames(sample.video_path, frames_this_round)
+            images = extract_frames(sample.video_path, frames_this_round)
             if not images:
                 # fallback: if decoding fails, skip sample
                 failed += 1
@@ -807,11 +511,11 @@ def main() -> int:
                 break
 
             used_images.extend(images)
-            seen_frames = _dedupe_preserve_order(seen_frames + frames_this_round)
+            seen_frames = dedupe_preserve_order(seen_frames + frames_this_round)
 
             candidate_unseen = None
             if args.use_candidate_frames:
-                candidate_unseen = _propose_candidate_unseen_frames(
+                candidate_unseen = propose_candidate_frames(
                     frame_count, set(seen_frames), args.candidate_k, rng=rng
                 )
 
@@ -837,7 +541,7 @@ def main() -> int:
                         *[
                             {
                                 "type": "image_url",
-                                "image_url": {"url": f"data:image/jpeg;base64,{_b64_jpeg(img)}"},
+                                "image_url": {"url": f"data:image/jpeg;base64,{b64_jpeg(img)}"},
                             }
                             for img in images
                         ],
@@ -883,10 +587,10 @@ def main() -> int:
                     illegal_action = True
                     break
 
-            answer_text = _extract_tag(raw, _ANSWER_RE)
-            frames_text = _extract_tag(raw, _FRAMES_RE)
-            summary_text = _extract_tag(raw, _SUMMARY_RE)
-            think_text = _extract_tag(raw, _THINK_RE)
+            answer_text = extract_tag(raw, ANSWER_RE)
+            frames_text = extract_tag(raw, FRAMES_RE)
+            summary_text = extract_tag(raw, SUMMARY_RE)
+            think_text = extract_tag(raw, THINK_RE)
 
             def _log_event(done: bool, **extra: Any) -> None:
                 if not log_jsonl:
@@ -916,11 +620,11 @@ def main() -> int:
                 if think_text is not None:
                     invalid = True
                     invalid_reason = "invalid_think"
-                if summary_text is None or _is_placeholder(summary_text) or _contains_banned_example(summary_text) or not _summary_has_ohrpu(summary_text):
+                if summary_text is None or is_placeholder(summary_text) or contains_banned_example(summary_text) or not summary_has_ohrpu(summary_text):
                     invalid = True
                     invalid_reason = "invalid_summary"
                 if answer_text:
-                    norm = _normalize_answer_letter(answer_text, len(sample.choices))
+                    norm = normalize_answer_letter(answer_text, len(sample.choices))
                     if norm is None:
                         invalid = True
                         invalid_reason = "invalid_answer"
@@ -970,10 +674,10 @@ def main() -> int:
                     illegal_action = True
                     break
 
-                answer_text = _extract_tag(raw, _ANSWER_RE)
-                frames_text = _extract_tag(raw, _FRAMES_RE)
-                summary_text = _extract_tag(raw, _SUMMARY_RE)
-                think_text = _extract_tag(raw, _THINK_RE)
+                answer_text = extract_tag(raw, ANSWER_RE)
+                frames_text = extract_tag(raw, FRAMES_RE)
+                summary_text = extract_tag(raw, SUMMARY_RE)
+                think_text = extract_tag(raw, THINK_RE)
 
             if illegal_action:
                 break
@@ -987,7 +691,7 @@ def main() -> int:
 
             # Frame request path.
             assert frames_text is not None
-            requested = _dedupe_preserve_order(_parse_frame_indices(frames_text))
+            requested = dedupe_preserve_order(parse_int_list(frames_text))
             if args.use_candidate_frame_ids and candidate_unseen:
                 mapped: list[int] = []
                 invalid_id = False
@@ -1001,7 +705,7 @@ def main() -> int:
                     invalid_outputs += 1
                     illegal_action = True if args.strict_actions else False
                     break
-                requested = _dedupe_preserve_order(mapped)
+                requested = dedupe_preserve_order(mapped)
             elif args.require_candidate_frames and candidate_unseen:
                 allowed = {int(i) for i in candidate_unseen}
                 requested = [i for i in requested if int(i) in allowed]
@@ -1011,13 +715,13 @@ def main() -> int:
                 illegal_action = True if args.strict_actions else False
                 break
 
-            allowed_ranges = _unseen_intervals(frame_count, seen_frames)
-            next_frames = [i for i in requested if 0 <= i < frame_count and i not in seen_frames and _in_intervals(i, allowed_ranges)]
+            allowed_ranges = unseen_intervals(frame_count, seen_frames)
+            next_frames = [i for i in requested if 0 <= i < frame_count and i not in seen_frames and in_intervals(i, allowed_ranges)]
             if not next_frames:
                 fallback_frames_used += 1
                 # fallback: sample a new unseen frame
                 fallback = _sample_unseen_frames(frame_count, set(seen_frames), args.max_frames_per_round, rng=rng)
-                next_frames = fallback[: args.max_frames_per_round] if fallback else _sample_uniform_indices(frame_count, 1)
+                next_frames = fallback[: args.max_frames_per_round] if fallback else sample_uniform_indices(frame_count, 1)
             frames_this_round = next_frames[: args.max_frames_per_round]
 
             _log_event(False, requested_frames=requested, next_frames=frames_this_round, retries_used=per_sample_retries)
@@ -1049,8 +753,8 @@ def main() -> int:
                         timeout_s=args.request_timeout_s,
                     )
                     total_model_calls += 1
-                    answer_text = _extract_tag(raw, _ANSWER_RE)
-                    final_answer = _normalize_answer_letter(answer_text or "", len(sample.choices))
+                    answer_text = extract_tag(raw, ANSWER_RE)
+                    final_answer = normalize_answer_letter(answer_text or "", len(sample.choices))
                     if final_answer is not None:
                         answer_round = int(args.max_rounds)
                         if log_jsonl:
@@ -1159,7 +863,7 @@ def main() -> int:
             json.dump(summary, f, indent=2, ensure_ascii=False)
 
     if server_proc is not None:
-        _stop_server(server_proc)
+        stop_server(server_proc)
 
     print(json.dumps({"results": results, "summary_json": args.summary_json, "log_jsonl": log_jsonl}, indent=2))
     return 0

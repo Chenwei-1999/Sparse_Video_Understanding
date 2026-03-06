@@ -52,15 +52,19 @@ python3 -m verl.trainer.main_ppo \
 python examples/revise/plug_and_play_nextqa_vllm.py           # NExT-QA
 python examples/revise/plug_and_play_egoschema_vllm.py         # EgoSchema
 python examples/revise/plug_and_play_videomme_lvbench_vllm.py  # Video-MME / LVBench
+python examples/revise/plug_and_play_lvbench_hf.py             # LVBench (HF backend)
 python examples/revise/oneshot_lvbench_hf.py                   # One-shot baseline
 python examples/revise/eval_nextqa_caption_vllm.py             # Caption-only baseline
 ```
 
-### Linting
+### Linting & Type Checking
 ```bash
 ruff check .          # lint (line-length 120)
 ruff format .         # auto-format
+mypy verl/            # type check (mostly lenient, see below)
 ```
+
+**No test suite** — This repo has no pytest tests or test infrastructure.
 
 ## Architecture
 
@@ -125,7 +129,8 @@ Primary: Qwen2.5-VL (3B, 7B), InternVL2 (8B). Also tested with GPT-4o (plug-and-
 
 ## Code Conventions
 - Python 3.10+
-- Ruff linter: line-length 120, isort with `verl` as first-party
+- Ruff linter: line-length 120, rules E/F/UP/B/I/G enabled; isort with `verl` as first-party; `scripts/legacy_model_merger.py` excluded
+- Mypy: `ignore_errors = true` globally, but **strict** for `verl.trainer.config.algorithm`, `verl.trainer.ppo.core_algos`, `verl.trainer.ppo.reward`, `verl.workers.reward_manager.*`
 - Version in `verl/version/version` (currently `0.7.0.dev`)
 - Agent loops registered via `@register` decorator
 - Data passed between components via `DataProto` (tensordict-based)

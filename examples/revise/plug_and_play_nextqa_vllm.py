@@ -3,15 +3,11 @@
 from __future__ import annotations
 
 import argparse
-import base64
-import hashlib
-import io
 import json
 import os
 import random
 import re
 import shutil
-import socket
 import subprocess
 import sys
 import time
@@ -22,28 +18,44 @@ import pandas as pd
 import requests
 from PIL import Image
 
-try:
-    import wandb  # type: ignore
-except Exception:  # pragma: no cover
-    wandb = None
-
-
-_SUMMARY_RE = re.compile(r"<summary>(.*?)</summary>", re.DOTALL | re.IGNORECASE)
-_FRAMES_RE = re.compile(r"<frames>(.*?)</frames>", re.DOTALL | re.IGNORECASE)
-_ANSWER_RE = re.compile(r"<answer>(.*?)</answer>", re.DOTALL | re.IGNORECASE)
-_THINK_RE = re.compile(r"<think>(.*?)</think>", re.DOTALL | re.IGNORECASE)
+from examples.revise.pnp_prompts import (
+    SYSTEM_PROMPT as DEFAULT_SYSTEM_PROMPT,
+    SYSTEM_PROMPT_CAPTION_ONLY as DEFAULT_SYSTEM_PROMPT_CAPTION_ONLY,
+)
+from examples.revise.pnp_utils import (
+    ANSWER_RE,
+    FRAMES_RE,
+    SUMMARY_RE,
+    THINK_RE,
+    b64_jpeg,
+    contains_banned_example,
+    dedupe_preserve_order,
+    extract_frames,
+    extract_tag,
+    format_frame_list,
+    format_intervals,
+    get_model_id,
+    in_intervals,
+    indices_to_intervals,
+    is_placeholder,
+    maybe_init_wandb,
+    maybe_log_jsonl,
+    normalize_answer_letter,
+    normalize_video_id,
+    parse_int_list,
+    propose_candidate_frames,
+    sample_uniform_indices,
+    stable_sample_id_nextqa,
+    stop_server,
+    summary_has_ohrpu,
+    truncate_text,
+    unseen_intervals,
+    wait_port,
+    wandb_log,
+)
 
 _CAPTION_CACHE: dict[str, dict[int, str]] = {}
 _FPS_CACHE: dict[str, float] = {}
-
-
-def _truncate_text(text: str, max_chars: int) -> str:
-    if max_chars <= 0:
-        return text
-    text = text or ""
-    if len(text) <= max_chars:
-        return text
-    return text[: max_chars].rstrip() + "…"
 
 
 def _load_video_captions(captions_dir: str, video_id: str) -> dict[int, str]:
@@ -95,128 +107,6 @@ def _caption_key_for_frame_index(frame_idx: int, fps: float) -> int:
     return int(frame_idx)
 
 
-DEFAULT_SYSTEM_PROMPT = (
-    "You are REVISE, a multi-round video reasoning agent.\n"
-    "Each round you will see: (1) a multiple-choice question with options, (2) the current belief summary, "
-    "and (3) a few sampled video frames.\n"
-    "If you are confident, answer the question.\n"
-    "If you are NOT confident, request MORE video frames to view NEXT.\n"
-    "Frames are sampled at ~1 fps; frame index ≈ timestamp in seconds.\n\n"
-    "IMPORTANT: Output must follow EXACTLY ONE of the two formats below. Do not output any text outside tags.\n"
-    "Output ONLY <summary> plus either <frames> (request) OR <answer> (final).\n"
-    "Do NOT output <think>.\n"
-    "Do NOT output bare placeholders like '...', 'none', or 'N/A' as your summary fields.\n"
-    "It's OK to say something is unclear/unknown *within a sentence*, but do not leave fields empty.\n\n"
-    "Format 1 — Request more frames (use this only if NOT confident):\n"
-    "<summary>P: previously seen frames show a person in the scene interacting with objects; "
-    "O: I observe an action that may be relevant to the question; "
-    "H: based on the evidence so far, my belief is updated but still incomplete; "
-    "U: a key detail needed to answer is still unclear; "
-    "R: request additional frames to gather the missing evidence</summary>\n"
-    "<frames>1, 3</frames>\n\n"
-    "If Candidate Frame IDs are provided in the user prompt, request using those IDs (e.g., <frames>1, 3</frames>).\n\n"
-    "Format 2 — Answer now (use this if confident):\n"
-    "<summary>P: previously seen frames already contain the key evidence; "
-    "O: the answer-relevant evidence is visible in the shown frames; "
-    "H: my belief is updated based on the observed evidence; "
-    "U: no remaining ambiguity that affects the answer; "
-    "R: answered</summary>\n"
-    "<answer>B</answer>\n\n"
-    "Tag meanings:\n"
-    "- <summary>: the ONLY persistent memory across rounds. Keep it short and update it EVERY round.\n"
-    "  The summary MUST be written in this exact order: P → O → H → U → R.\n"
-    "  - P (Previously seen): which frames have already been used/seen (write as a sentence; no Python lists).\n"
-    "  - O (Observations): what you currently observe in the selected frames.\n"
-    "  - H (Belief updates): updated belief based on what has been observed so far (do NOT include the final answer letter).\n"
-    "  - U (Uncertainties): what is still unknown or ambiguous.\n"
-    "  - R (Reasons): why you need more frames and what evidence you are looking for next (or 'answered').\n\n"
-    "Rules:\n"
-    "- Frame indices are 0-based in [0, L-1].\n"
-    "- If you are confident, answer instead of requesting more frames.\n"
-    "- If requesting, choose 1 to {max_frames_per_round} NEW frames to view NEXT.\n"
-    "- Do NOT output any frame index from the Seen frames list; those are already viewed.\n"
-    "- When provided, request frames ONLY within the allowed unseen frame ranges.\n"
-    "- When Candidate Frame IDs are provided, output those IDs (1..K) in <frames> instead of raw frame indices.\n"
-    "- In <frames>, output comma-separated integers only (no brackets, no text).\n"
-    "- In <summary>, include P/O/H/U/R as short natural-language sentences that reflect your current understanding.\n"
-    "- The order inside <summary> MUST be: P then O then H then U then R.\n"
-    "- In P, describe previously seen frames in a sentence (describe content; do NOT list frame indices or use Python lists like [4, 8, 12]).\n"
-    "- In <answer>, output EXACTLY ONE option letter shown in the question (e.g., A/B/C/D/E). No words/punctuation.\n"
-    "- Never copy the example text; replace it with information from the current video.\n"
-)
-
-
-DEFAULT_SYSTEM_PROMPT_CAPTION_ONLY = (
-    "You are REVISE, a multi-round video reasoning agent.\n"
-    "In this run you will NOT receive images. Instead, each round you will see: "
-    "(1) a multiple-choice question with options, (2) the current belief summary, "
-    "and (3) caption observations sampled at ~1 fps (caption index ≈ timestamp in seconds).\n"
-    "If you are confident, answer the question.\n"
-    "If you are NOT confident, request MORE caption indices to view NEXT.\n\n"
-    "IMPORTANT: Output must follow EXACTLY ONE of the two formats below. Do not output any text outside tags.\n"
-    "Output ONLY <summary> plus either <frames> (request) OR <answer> (final).\n"
-    "Do NOT output <think>.\n"
-    "Do NOT output bare placeholders like '...', 'none', or 'N/A' as your summary fields.\n"
-    "It's OK to say something is unclear/unknown *within a sentence*, but do not leave fields empty.\n\n"
-    "Format 1 — Request more indices (use this only if NOT confident):\n"
-    "<summary>P: previously seen captions describe what has happened so far; "
-    "O: I observe events/objects mentioned in the shown captions that may be relevant; "
-    "H: based on the evidence so far, my belief is updated but still incomplete; "
-    "U: a key detail needed to answer is still unclear; "
-    "R: request additional caption indices to gather the missing evidence</summary>\n"
-    "<frames>1, 3</frames>\n\n"
-    "Format 2 — Answer now (use this if confident):\n"
-    "<summary>P: previously seen captions already contain the key evidence; "
-    "O: the answer-relevant evidence is present in the shown captions; "
-    "H: my belief is updated based on the observed evidence; "
-    "U: no remaining ambiguity that affects the answer; "
-    "R: answered</summary>\n"
-    "<answer>B</answer>\n\n"
-    "Tag meanings:\n"
-    "- <summary>: the ONLY persistent memory across rounds. Keep it short and update it EVERY round.\n"
-    "  The summary MUST be written in this exact order: P → O → H → U → R.\n"
-    "  - P (Previously seen): what has already been observed in earlier rounds.\n"
-    "  - O (Observations): what you currently observe in the shown captions.\n"
-    "  - H (Belief updates): updated belief based on what has been observed so far (do NOT include the final answer letter).\n"
-    "  - U (Uncertainties): what is still unknown or ambiguous.\n"
-    "  - R (Reasons): why you need more evidence and what you are looking for next (or 'answered').\n\n"
-    "Rules:\n"
-    "- Caption indices are 0-based in [0, L-1].\n"
-    "- If you are confident, answer instead of requesting more indices.\n"
-    "- If requesting, choose 1 to {max_frames_per_round} NEW indices to view NEXT.\n"
-    "- Do NOT output any index from the Seen list; those are already viewed.\n"
-    "- When provided, request indices ONLY within the allowed unseen ranges.\n"
-    "- In <frames>, output comma-separated integers only (no brackets, no text).\n"
-    "- In <summary>, include P/O/H/U/R as short natural-language sentences that reflect your current understanding.\n"
-    "- The order inside <summary> MUST be: P then O then H then U then R.\n"
-    "- In <answer>, output EXACTLY ONE option letter shown in the question (e.g., A/B/C/D/E). No words/punctuation.\n"
-    "- Never copy the example text; replace it with information from the current captions.\n"
-)
-
-
-def _contains_banned_example(text: str) -> bool:
-    """Detect accidental copying of legacy few-shot example content."""
-    t = _collapse_ws(text).lower()
-    if not t:
-        return False
-    if "george approaching a shelf" in t:
-        return True
-    if "george pauses" in t and "shelf" in t:
-        return True
-    return False
-
-
-def _extract_tag(text: str, pattern: re.Pattern[str]) -> Optional[str]:
-    matches = list(pattern.finditer(text or ""))
-    if not matches:
-        return None
-    return matches[-1].group(1).strip()
-
-
-def _parse_frame_indices(text: str) -> list[int]:
-    return [int(n) for n in re.findall(r"\d+", text or "")]
-
-
 def _frames_has_range_syntax(frames_text: str) -> bool:
     if not frames_text:
         return False
@@ -224,146 +114,10 @@ def _frames_has_range_syntax(frames_text: str) -> bool:
     return bool(re.search(r"\d+\s*[-–—]\s*\d+", frames_text))
 
 
-def _dedupe_preserve_order(indices: list[int]) -> list[int]:
-    seen: set[int] = set()
-    out: list[int] = []
-    for idx in indices or []:
-        if idx in seen:
-            continue
-        seen.add(idx)
-        out.append(idx)
-    return out
-
-
-def _indices_to_intervals(indices: list[int]) -> list[tuple[int, int]]:
-    """Convert a list of indices to inclusive [start, end] intervals."""
-    if not indices:
-        return []
-    sorted_unique = sorted({int(i) for i in indices})
-    intervals: list[tuple[int, int]] = []
-    start = prev = sorted_unique[0]
-    for idx in sorted_unique[1:]:
-        if idx == prev + 1:
-            prev = idx
-            continue
-        intervals.append((start, prev))
-        start = prev = idx
-    intervals.append((start, prev))
-    return intervals
-
-
-def _normalize_answer_letter(answer_text: str, num_choices: int) -> Optional[str]:
-    allowed = {chr(ord("A") + i) for i in range(max(0, num_choices))}
-    if not allowed:
-        allowed = {"A", "B", "C", "D", "E"}
-
-    candidate = (answer_text or "").strip().upper()
-    if candidate in allowed:
-        return candidate
-
-    match = re.search(r"\b([A-E])\b", candidate)
-    if match and match.group(1).upper() in allowed:
-        return match.group(1).upper()
-
-    match = re.search(r"([A-E])", candidate)
-    if match and match.group(1).upper() in allowed:
-        return match.group(1).upper()
-    return None
-
-
-def _sample_uniform_indices(frame_count: int, n: int) -> list[int]:
-    if n <= 0:
-        return []
-    if frame_count <= 0:
-        return list(range(n))
-    if n == 1:
-        return [frame_count // 2]
-    if frame_count == 1:
-        return [0]
-    return [round(i * (frame_count - 1) / (n - 1)) for i in range(n)]
-
-
-_PLACEHOLDER_SET = {"...", "…", "none", "n/a", "na", "null", "unknown", "unsure", "uncertain"}
-
-
-def _collapse_ws(text: str) -> str:
-    return re.sub(r"\s+", " ", str(text)).strip()
-
-
-def _format_frame_list(frames: list[int]) -> str:
-    if not frames:
-        return "no frames yet"
-    return ", ".join(str(int(i)) for i in frames)
-
-
-def _unseen_intervals(frame_count: int, seen_frames: list[int]) -> list[tuple[int, int]]:
-    """Return unseen frame ranges as inclusive [start, end] intervals."""
-    if frame_count <= 0:
-        return []
-    seen = sorted({int(i) for i in (seen_frames or []) if 0 <= int(i) < frame_count})
-    anchors = [-1, *seen, frame_count]
-    intervals: list[tuple[int, int]] = []
-    for a, b in zip(anchors, anchors[1:], strict=False):
-        start = a + 1
-        end = b - 1
-        if start <= end:
-            intervals.append((start, end))
-    return intervals
-
-
-def _format_intervals(intervals: list[tuple[int, int]]) -> str:
-    if not intervals:
-        return "none"
-    parts: list[str] = []
-    for start, end in intervals:
-        if start == end:
-            parts.append(str(start))
-        else:
-            parts.append(f"{start}-{end}")
-    return "; ".join(parts)
-
-
-def _in_intervals(idx: int, intervals: list[tuple[int, int]]) -> bool:
-    for start, end in intervals:
-        if start <= idx <= end:
-            return True
-    return False
-
-
-def _is_placeholder(text: str) -> bool:
-    t = _collapse_ws(text).lower()
-    if not t:
-        return True
-    if "..." in t or "…" in t:
-        return True
-    if t in _PLACEHOLDER_SET:
-        return True
-    if re.fullmatch(r"[.·•…]+", t):
-        return True
-    alnum = re.findall(r"[a-z0-9]+", t)
-    if len(alnum) <= 1 and len(t) <= 6:
-        return True
-    return False
-
-
-def _summary_has_ohrpu(summary_text: str) -> bool:
-    if summary_text is None:
-        return False
-    s = _collapse_ws(summary_text)
-    keys = ["P", "O", "H", "U", "R"]
-    positions = []
-    for key in keys:
-        m = re.search(rf"\b{key}\s*:\s*", s, re.IGNORECASE)
-        if m is None:
-            return False
-        positions.append(m.start())
-    return all(a < b for a, b in zip(positions, positions[1:], strict=False))
-
-
 def _summary_has_stale_boilerplate(summary_text: str, *, seen_count: int) -> bool:
     if not summary_text or seen_count <= 0:
         return False
-    s = _collapse_ws(summary_text).lower()
+    s = re.sub(r"\s+", " ", str(summary_text)).strip().lower()
     if "has not seen any frames yet" in s:
         return True
     if re.search(r"\bhas not seen any (frame|frames|caption|captions) yet\b", s):
@@ -373,35 +127,6 @@ def _summary_has_stale_boilerplate(summary_text: str, *, seen_count: int) -> boo
     if "no captions yet" in s:
         return True
     return False
-
-
-def _b64_jpeg(img: Image.Image) -> str:
-    if img.mode != "RGB":
-        img = img.convert("RGB")
-    buf = io.BytesIO()
-    img.save(buf, format="JPEG", quality=90)
-    return base64.b64encode(buf.getvalue()).decode("utf-8")
-
-
-def _wait_port(host: str, port: int, timeout_s: int = 300) -> None:
-    start = time.time()
-    while time.time() - start < timeout_s:
-        try:
-            with socket.create_connection((host, port), timeout=1.0):
-                return
-        except OSError:
-            time.sleep(1)
-    raise TimeoutError(f"Timed out waiting for {host}:{port} to accept connections after {timeout_s}s")
-
-
-def _get_model_id(base_url: str, timeout: int = 30) -> str:
-    resp = requests.get(f"{base_url}/v1/models", timeout=timeout)
-    resp.raise_for_status()
-    data = resp.json()
-    models = data.get("data", [])
-    if not models:
-        raise RuntimeError(f"No models returned from {base_url}/v1/models")
-    return models[0]["id"]
 
 
 def _format_question(question: str, choices: list[str]) -> str:
@@ -442,7 +167,7 @@ def _build_user_text(
             "(do NOT request any previously shown frames; follow the selection constraints below)."
         )
     else:
-        lines.append(f"Seen frames (already viewed; do NOT request these again): {_format_frame_list(seen_frames)}")
+        lines.append(f"Seen frames (already viewed; do NOT request these again): {format_frame_list(seen_frames)}")
 
     if candidate_unseen_frames and use_candidate_frame_ids:
         lines.append(
@@ -462,7 +187,7 @@ def _build_user_text(
     else:
         lines.append(
             "Allowed unseen frame ranges for <frames> (choose NEW indices only from these ranges): "
-            f"{_format_intervals(_unseen_intervals(frame_count, seen_frames))}"
+            f"{format_intervals(unseen_intervals(frame_count, seen_frames))}"
         )
         if candidate_unseen_frames:
             prefix = (
@@ -471,7 +196,7 @@ def _build_user_text(
                 else "Candidate unseen frame ranges to request (optional, all NEW): "
             )
             lines.append(
-                prefix + f"{_format_intervals(_indices_to_intervals(candidate_unseen_frames))}"
+                prefix + f"{format_intervals(indices_to_intervals(candidate_unseen_frames))}"
             )
             if require_candidate_frames:
                 lines.append("In <frames>, output ONLY indices within the Candidate unseen frame ranges above.")
@@ -527,28 +252,6 @@ def _build_user_text(
     return "\n".join(lines)
 
 
-def _extract_frames(video_path: str, frame_indices: list[int]) -> list[Image.Image]:
-    if not frame_indices:
-        return []
-    # Try decord first (fast).
-    try:
-        import decord
-
-        vr = decord.VideoReader(video_path, ctx=decord.cpu(0))
-        frames = vr.get_batch(frame_indices).asnumpy()
-        return [Image.fromarray(frame) for frame in frames]
-    except Exception:
-        pass
-    # Fall back to imageio.
-    import imageio
-
-    reader = imageio.get_reader(video_path, "ffmpeg")
-    try:
-        return [Image.fromarray(reader.get_data(idx)) for idx in frame_indices]
-    finally:
-        reader.close()
-
-
 @dataclass
 class NextQASample:
     sample_id: str
@@ -559,24 +262,6 @@ class NextQASample:
     choices: list[str]
     answer_idx: int
     frame_count: int
-
-
-def _stable_sample_id(video_id: str, question: str, choices: list[str], answer_idx: int) -> str:
-    payload = {
-        "video_id": str(video_id),
-        "question": str(question),
-        "choices": [str(c) for c in (choices or [])],
-        "answer_idx": int(answer_idx),
-    }
-    return hashlib.sha1(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
-
-
-def _normalize_video_id(video_id: Any) -> str:
-    if isinstance(video_id, int):
-        return str(video_id)
-    if isinstance(video_id, float):
-        return str(int(video_id))
-    return str(video_id)
 
 
 def _load_nextqa_samples(
@@ -597,7 +282,7 @@ def _load_nextqa_samples(
 
     samples: list[NextQASample] = []
     for _, row in df.iterrows():
-        video_id = _normalize_video_id(row["video"])
+        video_id = normalize_video_id(row["video"])
         rel = video_map.get(video_id)
         if rel is None:
             continue
@@ -610,7 +295,7 @@ def _load_nextqa_samples(
         answer_idx = int(row.get("answer", 0))
         samples.append(
             NextQASample(
-                sample_id=_stable_sample_id(video_id, str(row.get("question", "")), choices, answer_idx),
+                sample_id=stable_sample_id_nextqa(video_id, str(row.get("question", "")), choices, answer_idx),
                 qid=str(row.get("qid", "")),
                 video_id=video_id,
                 video_path=video_path,
@@ -636,105 +321,6 @@ def _sample_unseen_frames(frame_count: int, seen: set[int], k: int, rng: random.
     if len(candidates) <= k:
         return candidates
     return sorted(rng.sample(candidates, k=k))
-
-
-def _propose_candidate_frames(
-    frame_count: int,
-    seen: set[int],
-    k: int,
-    rng: random.Random,
-) -> list[int]:
-    """Propose a small set of NEW frame indices for the model to choose from.
-
-    Strategy: pick midpoints of the largest gaps between already-seen frames
-    (gap-filling), then random fill from remaining unseen frames.
-    """
-    if frame_count <= 0 or k <= 0:
-        return []
-    if len(seen) >= frame_count:
-        return []
-
-    seen_sorted = sorted(i for i in seen if 0 <= i < frame_count)
-    anchors = sorted(set([0, frame_count - 1, *seen_sorted]))
-
-    candidates: list[int] = []
-
-    # 1) Midpoints of the largest unseen gaps.
-    gaps: list[tuple[int, int, int]] = []
-    for a, b in zip(anchors, anchors[1:], strict=False):
-        if b - a <= 1:
-            continue
-        gaps.append((b - a, a, b))
-    gaps.sort(reverse=True)
-    for _, a, b in gaps:
-        mid = (a + b) // 2
-        for d in (0, -1, 1, -2, 2, -3, 3):
-            idx = mid + d
-            if a < idx < b and idx not in seen and idx not in candidates:
-                candidates.append(idx)
-                break
-        if len(candidates) >= k:
-            return sorted(candidates[:k])
-
-    # 2) Random fill if still short.
-    need = k - len(candidates)
-    if need > 0:
-        remaining = [i for i in range(frame_count) if i not in seen and i not in candidates]
-        if remaining:
-            fill = rng.sample(remaining, k=min(need, len(remaining)))
-            candidates.extend(sorted(fill))
-
-    return sorted(candidates[:k])
-
-
-def _maybe_log_jsonl(path: Optional[str], obj: dict[str, Any]) -> None:
-    if not path:
-        return
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "a", encoding="utf-8") as f:
-        f.write(json.dumps(obj, ensure_ascii=False) + "\n")
-
-
-def _maybe_init_wandb(args: argparse.Namespace, run_config: dict[str, Any]) -> Any:
-    if not getattr(args, "use_wandb", False) or wandb is None:
-        return None
-
-    def _has_wandb_credentials() -> bool:
-        if os.getenv("WANDB_API_KEY"):
-            return True
-        if os.getenv("WANDB_IDENTITY_TOKEN_FILE"):
-            return True
-        try:
-            from wandb.sdk.lib.wbauth import wbnetrc
-
-            base_url = os.getenv("WANDB_BASE_URL") or "https://api.wandb.ai"
-            return bool(wbnetrc.read_netrc_auth(host=base_url))
-        except Exception:
-            return False
-
-    mode = getattr(args, "wandb_mode", "") or os.getenv("WANDB_MODE")
-    if not mode:
-        mode = "online" if _has_wandb_credentials() else "offline"
-    # Avoid interactive login prompts / hard failures in batch jobs.
-    if str(mode).lower() == "online" and not _has_wandb_credentials():
-        mode = "offline"
-
-    return wandb.init(
-        project=args.wandb_project,
-        entity=args.wandb_entity,
-        name=args.wandb_name,
-        group=args.wandb_group,
-        tags=args.wandb_tags.split(",") if args.wandb_tags else None,
-        mode=mode,
-        config=run_config,
-        reinit=True,
-    )
-
-
-def _wandb_log(run: Any, metrics: dict[str, Any], step: int) -> None:
-    if run is None or wandb is None:
-        return
-    wandb.log(metrics, step=step)
 
 
 def _retry_feedback_text(feedback: str, *, force_answer: bool = False) -> str:
@@ -810,9 +396,9 @@ def _load_progress_from_log(
                 current_answer = None
                 current_answer_round = None
 
-            answer = _extract_tag(raw, _ANSWER_RE)
+            answer = extract_tag(raw, ANSWER_RE)
             if answer and current_answer is None:
-                answer_letter = _normalize_answer_letter(answer, current_num_choices)
+                answer_letter = normalize_answer_letter(answer, current_num_choices)
                 if answer_letter is not None:
                     current_answer = answer_letter
                     # For forced answers, we log an extra request after max_rounds, but the "round budget" is max_rounds.
@@ -851,7 +437,7 @@ def _chat_once(
             content.append(
                 {
                     "type": "image_url",
-                    "image_url": {"url": f"data:image/jpeg;base64,{_b64_jpeg(img)}"},
+                    "image_url": {"url": f"data:image/jpeg;base64,{b64_jpeg(img)}"},
                 }
             )
         if parts[-1]:
@@ -861,7 +447,7 @@ def _chat_once(
             content.append(
                 {
                     "type": "image_url",
-                    "image_url": {"url": f"data:image/jpeg;base64,{_b64_jpeg(img)}"},
+                    "image_url": {"url": f"data:image/jpeg;base64,{b64_jpeg(img)}"},
                 }
             )
         content.append({"type": "text", "text": user_text})
@@ -914,7 +500,7 @@ def _start_vllm_server(args: argparse.Namespace) -> subprocess.Popen[str]:
         "--gpu-memory-utilization",
         str(args.gpu_memory_utilization),
         "--limit-mm-per-prompt",
-        json.dumps({"image": int(args.max_frames_per_round)}),
+        f"image={int(args.max_frames_per_round)}",
     ]
     server_stdout = subprocess.DEVNULL
     server_stderr = subprocess.DEVNULL
@@ -926,15 +512,6 @@ def _start_vllm_server(args: argparse.Namespace) -> subprocess.Popen[str]:
         server_stdout = log_f
         server_stderr = log_f
     return subprocess.Popen(cmd, env=env, stdout=server_stdout, stderr=server_stderr)
-
-
-def _stop_server(proc: subprocess.Popen[str]) -> None:
-    proc.terminate()
-    try:
-        proc.wait(timeout=10)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.wait(timeout=10)
 
 
 def main() -> int:
@@ -1110,10 +687,10 @@ def main() -> int:
     try:
         if args.start_server:
             server_proc = _start_vllm_server(args)
-            _wait_port(args.host, args.port, timeout_s=args.server_timeout_s)
+            wait_port(args.host, args.port, timeout_s=args.server_timeout_s)
 
         base_url = f"http://{args.host}:{args.port}"
-        model_id = _get_model_id(base_url)
+        model_id = get_model_id(base_url)
 
         samples = _load_nextqa_samples(
             csv_path=args.csv,
@@ -1161,7 +738,7 @@ def main() -> int:
 
         processed = resume_completed
         failed = 0
-        run = _maybe_init_wandb(
+        run = maybe_init_wandb(
             args,
             run_config={
                 "task": "revise_plug_and_play_nextqa_vllm",
@@ -1272,7 +849,7 @@ def main() -> int:
                         key = _caption_key_for_frame_index(int(idx), fps)
                     return video_captions.get(int(key)) or "[no caption]"
 
-                init_frames = _sample_uniform_indices(frame_count, args.max_frames_per_round)
+                init_frames = sample_uniform_indices(frame_count, args.max_frames_per_round)
                 next_frames = [int(i) for i in init_frames if i >= 0]
                 answer_letter: Optional[str] = None
                 last_user_text: Optional[str] = None
@@ -1283,7 +860,7 @@ def main() -> int:
                     # Frames shown in this round.
                     frames_this_round = [i for i in next_frames if i not in seen_frames]
                     if not frames_this_round:
-                        frames_this_round = _sample_uniform_indices(frame_count, 1)
+                        frames_this_round = sample_uniform_indices(frame_count, 1)
                     frames_this_round = frames_this_round[: args.max_frames_per_round]
                     for i in frames_this_round:
                         if i not in seen_frames:
@@ -1292,7 +869,7 @@ def main() -> int:
                     candidate_next_frames: list[int] = []
                     if getattr(args, "use_candidate_frames", False):
                         k = args.candidate_k if args.candidate_k is not None else max(12, args.max_frames_per_round * 4)
-                        candidate_next_frames = _propose_candidate_frames(
+                        candidate_next_frames = propose_candidate_frames(
                             frame_count=frame_count,
                             seen=set(seen_frames),
                             k=k,
@@ -1307,21 +884,21 @@ def main() -> int:
                         max_chars = int(getattr(args, "caption_max_chars", 0))
                         if include in ("shown", "both"):
                             shown_captions = [
-                                _truncate_text(_caption_for_index(int(i)), max_chars)
+                                truncate_text(_caption_for_index(int(i)), max_chars)
                                 for i in frames_this_round
                             ]
                             if observation_mode != "caption":
                                 shown_ts = [_caption_key_for_frame_index(int(i), fps) for i in frames_this_round]
                         if include in ("candidate", "both") and candidate_next_frames:
                             candidate_captions = [
-                                _truncate_text(_caption_for_index(int(i)), max_chars)
+                                truncate_text(_caption_for_index(int(i)), max_chars)
                                 for i in candidate_next_frames
                             ]
                             if observation_mode != "caption":
                                 candidate_ts = [_caption_key_for_frame_index(int(i), fps) for i in candidate_next_frames]
                     images: list[Image.Image] = []
                     if observation_mode != "caption":
-                        images = _extract_frames(sample.video_path, frames_this_round)
+                        images = extract_frames(sample.video_path, frames_this_round)
                     user_text = _build_user_text(
                         question_block=question_block,
                         summary=summary_state,
@@ -1365,11 +942,11 @@ def main() -> int:
                         )
                         total_model_calls += 1
 
-                        frames_tag = _extract_tag(raw, _FRAMES_RE)
+                        frames_tag = extract_tag(raw, FRAMES_RE)
                         requested_raw_frames: Optional[list[int]] = None
                         requested_mapped_frames: Optional[list[int]] = None
                         if frames_tag is not None:
-                            requested_raw_frames = _dedupe_preserve_order(_parse_frame_indices(frames_tag))
+                            requested_raw_frames = dedupe_preserve_order(parse_int_list(frames_tag))
                             if bool(args.use_candidate_frame_ids) and candidate_next_frames:
                                 mapped: list[int] = []
                                 invalid_id = False
@@ -1378,11 +955,11 @@ def main() -> int:
                                         mapped.append(int(candidate_next_frames[cid - 1]))
                                     else:
                                         invalid_id = True
-                                requested_mapped_frames = None if invalid_id else _dedupe_preserve_order(mapped)
+                                requested_mapped_frames = None if invalid_id else dedupe_preserve_order(mapped)
                             else:
                                 requested_mapped_frames = requested_raw_frames
 
-                        _maybe_log_jsonl(
+                        maybe_log_jsonl(
                             args.log_jsonl,
                             {
                                 "ts": time.time(),
@@ -1416,17 +993,17 @@ def main() -> int:
                             },
                         )
 
-                        summary = _extract_tag(raw, _SUMMARY_RE)
+                        summary = extract_tag(raw, SUMMARY_RE)
                         if (
                             summary
-                            and (not _is_placeholder(summary))
-                            and (not _contains_banned_example(summary))
-                            and _summary_has_ohrpu(summary)
+                            and (not is_placeholder(summary))
+                            and (not contains_banned_example(summary))
+                            and summary_has_ohrpu(summary)
                             and (not _summary_has_stale_boilerplate(summary, seen_count=len(seen_frames)))
                         ):
                             summary_state = summary
 
-                        think = _extract_tag(raw, _THINK_RE)
+                        think = extract_tag(raw, THINK_RE)
                         if think is not None:
                             invalid_outputs += 1
                             terminated_reason = "invalid_think"
@@ -1451,13 +1028,13 @@ def main() -> int:
                             next_frames = (
                                 requested[: args.max_frames_per_round]
                                 if requested
-                                else _sample_uniform_indices(frame_count, 1)
+                                else sample_uniform_indices(frame_count, 1)
                             )
                             break
 
-                        answer = _extract_tag(raw, _ANSWER_RE)
+                        answer = extract_tag(raw, ANSWER_RE)
                         if answer:
-                            answer_letter = _normalize_answer_letter(answer, len(sample.choices))
+                            answer_letter = normalize_answer_letter(answer, len(sample.choices))
                             if answer_letter is None:
                                 invalid_outputs += 1
                                 terminated_reason = "invalid_answer_letter"
@@ -1481,7 +1058,7 @@ def main() -> int:
                                     frame_count, set(seen_frames), args.max_frames_per_round, rng=rng
                                 )
                                 if not next_frames:
-                                    next_frames = _sample_uniform_indices(frame_count, 1)
+                                    next_frames = sample_uniform_indices(frame_count, 1)
                                 answer_letter = None
                                 break
 
@@ -1508,15 +1085,15 @@ def main() -> int:
                                     frame_count, set(seen_frames), args.max_frames_per_round, rng=rng
                                 )
                                 if not next_frames:
-                                    next_frames = _sample_uniform_indices(frame_count, 1)
+                                    next_frames = sample_uniform_indices(frame_count, 1)
                                 answer_letter = None
                                 break
 
                             if (
                                 summary is None
-                                or _is_placeholder(summary)
-                                or _contains_banned_example(summary)
-                                or (not _summary_has_ohrpu(summary))
+                                or is_placeholder(summary)
+                                or contains_banned_example(summary)
+                                or (not summary_has_ohrpu(summary))
                                 or _summary_has_stale_boilerplate(summary, seen_count=len(seen_frames))
                             ):
                                 invalid_outputs += 1
@@ -1534,7 +1111,7 @@ def main() -> int:
 
                             break
 
-                        frames_text = _extract_tag(raw, _FRAMES_RE)
+                        frames_text = extract_tag(raw, FRAMES_RE)
 
                         # If we didn't answer, we must request frames, with a valid summary.
                         if frames_text is None:
@@ -1554,10 +1131,10 @@ def main() -> int:
                                 terminated_invalid_action = True
                                 answer_letter = None
                                 break
-                            next_frames = _sample_uniform_indices(frame_count, 1)
+                            next_frames = sample_uniform_indices(frame_count, 1)
                             break
 
-                        if summary is None or _is_placeholder(summary) or _contains_banned_example(summary) or (not _summary_has_ohrpu(summary)):
+                        if summary is None or is_placeholder(summary) or contains_banned_example(summary) or (not summary_has_ohrpu(summary)):
                             invalid_outputs += 1
                             terminated_reason = "invalid_select_summary"
                             if retry_idx < int(args.max_retries_per_round):
@@ -1597,7 +1174,7 @@ def main() -> int:
                                 attempt_user_text = f"{user_text}\n\n{retry_feedback}"
                                 continue
 
-                        requested = _dedupe_preserve_order(_parse_frame_indices(frames_text))
+                        requested = dedupe_preserve_order(parse_int_list(frames_text))
                         if bool(args.use_candidate_frame_ids) and candidate_next_frames:
                             mapped: list[int] = []
                             invalid_id = False
@@ -1633,11 +1210,11 @@ def main() -> int:
                                 next_frames = (
                                     requested[: args.max_frames_per_round]
                                     if requested
-                                    else _sample_uniform_indices(frame_count, 1)
+                                    else sample_uniform_indices(frame_count, 1)
                                 )
                                 break
                             else:
-                                requested = _dedupe_preserve_order(mapped)
+                                requested = dedupe_preserve_order(mapped)
                                 requested = [i for i in requested if 0 <= i < frame_count and i not in seen_frames]
                         else:
                             if bool(getattr(args, "require_candidate_frames", False)) and candidate_next_frames:
@@ -1663,11 +1240,11 @@ def main() -> int:
                                 else:
                                     requested = [i for i in requested if 0 <= i < frame_count and i not in seen_frames and int(i) in allowed]
                             else:
-                                allowed_ranges = _unseen_intervals(frame_count, seen_frames)
+                                allowed_ranges = unseen_intervals(frame_count, seen_frames)
                                 requested = [
                                     i
                                     for i in requested
-                                    if 0 <= i < frame_count and i not in seen_frames and _in_intervals(i, allowed_ranges)
+                                    if 0 <= i < frame_count and i not in seen_frames and in_intervals(i, allowed_ranges)
                                 ]
 
                         if requested and len(requested) > int(args.max_frames_per_round):
@@ -1681,7 +1258,7 @@ def main() -> int:
                                 total_retries += 1
                                 candidate_text = (
                                     " Allowed unseen ranges: "
-                                    f"{_format_intervals(_unseen_intervals(frame_count, seen_frames))}."
+                                    f"{format_intervals(unseen_intervals(frame_count, seen_frames))}."
                                 )
                                 retry_feedback = _retry_feedback_text(
                                     "Invalid response: requested frames must be NEW and within range. "
@@ -1707,7 +1284,7 @@ def main() -> int:
                                     frame_count, set(seen_frames), args.max_frames_per_round, rng=rng
                                 )
                             next_frames = (
-                                requested[: args.max_frames_per_round] if requested else _sample_uniform_indices(frame_count, 1)
+                                requested[: args.max_frames_per_round] if requested else sample_uniform_indices(frame_count, 1)
                             )
                             break
 
@@ -1744,7 +1321,7 @@ def main() -> int:
                         timeout_s=args.request_timeout_s,
                     )
                     total_model_calls += 1
-                    _maybe_log_jsonl(
+                    maybe_log_jsonl(
                         args.log_jsonl,
                         {
                             "ts": time.time(),
@@ -1765,9 +1342,9 @@ def main() -> int:
                         "raw_output": raw,
                     },
                 )
-                answer = _extract_tag(raw, _ANSWER_RE)
+                answer = extract_tag(raw, ANSWER_RE)
                 if answer:
-                    answer_letter = _normalize_answer_letter(answer, len(sample.choices))
+                    answer_letter = normalize_answer_letter(answer, len(sample.choices))
 
                 if answer_letter is not None:
                     pred_idx = ord(answer_letter) - ord("A")
@@ -1784,12 +1361,12 @@ def main() -> int:
                     and isinstance(e, requests.exceptions.RequestException)
                 ):
                     try:
-                        _stop_server(server_proc)
+                        stop_server(server_proc)
                     except Exception:
                         pass
                     server_proc = _start_vllm_server(args)
-                    _wait_port(args.host, args.port, timeout_s=args.server_timeout_s)
-                    model_id = _get_model_id(base_url)
+                    wait_port(args.host, args.port, timeout_s=args.server_timeout_s)
+                    model_id = get_model_id(base_url)
 
             if args.progress_interval > 0 and processed % args.progress_interval == 0:
                 elapsed = time.time() - start_eval
@@ -1803,7 +1380,7 @@ def main() -> int:
                     f"calls={total_model_calls} calls/sample={calls_per_sample:.2f} elapsed_s={elapsed:.1f}",
                     flush=True,
                 )
-                _wandb_log(
+                wandb_log(
                     run,
                     {
                         "eval/acc": acc,
@@ -1850,7 +1427,7 @@ def main() -> int:
             "fallback_frames_used": fallback_frames_used,
         }
         print(json.dumps(results, indent=2))
-        _wandb_log(
+        wandb_log(
             run,
             {
                 "eval/final_acc": acc,
@@ -1944,7 +1521,7 @@ def main() -> int:
         return 0
     finally:
         if server_proc is not None:
-            _stop_server(server_proc)
+            stop_server(server_proc)
 
 
 if __name__ == "__main__":
