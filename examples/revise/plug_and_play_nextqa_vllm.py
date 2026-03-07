@@ -12,11 +12,17 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Optional
 
 import pandas as pd
 import requests
 from PIL import Image
+
+# Allow direct execution via `python examples/...py`.
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from examples.revise.pnp_prompts import (
     SYSTEM_PROMPT as DEFAULT_SYSTEM_PROMPT,
@@ -34,6 +40,7 @@ from examples.revise.pnp_utils import (
     extract_tag,
     format_frame_list,
     format_intervals,
+    get_api_headers,
     get_model_id,
     in_intervals,
     indices_to_intervals,
@@ -44,6 +51,7 @@ from examples.revise.pnp_utils import (
     normalize_video_id,
     parse_int_list,
     propose_candidate_frames,
+    resolve_base_url,
     sample_uniform_indices,
     stable_sample_id_nextqa,
     stop_server,
@@ -51,6 +59,7 @@ from examples.revise.pnp_utils import (
     truncate_text,
     unseen_intervals,
     wait_port,
+    wait_for_server,
     wandb_log,
 )
 
@@ -463,7 +472,12 @@ def _chat_once(
         "max_tokens": max_tokens,
     }
 
-    resp = requests.post(f"{base_url}/v1/chat/completions", json=payload, timeout=timeout_s)
+    resp = requests.post(
+        f"{base_url}/v1/chat/completions",
+        headers=get_api_headers(),
+        json=payload,
+        timeout=timeout_s,
+    )
     resp.raise_for_status()
     data = resp.json()
     return data["choices"][0]["message"]["content"]
@@ -500,7 +514,7 @@ def _start_vllm_server(args: argparse.Namespace) -> subprocess.Popen[str]:
         "--gpu-memory-utilization",
         str(args.gpu_memory_utilization),
         "--limit-mm-per-prompt",
-        f"image={int(args.max_frames_per_round)}",
+        json.dumps({"image": int(args.max_frames_per_round)}),
     ]
     server_stdout = subprocess.DEVNULL
     server_stderr = subprocess.DEVNULL
@@ -594,6 +608,8 @@ def main() -> int:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=18000)
+    parser.add_argument("--base-url", default=None, help="OpenAI-compatible API base URL. Defaults to http://host:port.")
+    parser.add_argument("--model-id", default=None, help="Explicit remote model ID for chat completions.")
     parser.add_argument("--tensor-parallel-size", type=int, default=4)
     parser.add_argument("--dtype", default="bfloat16", choices=["bfloat16", "float16", "float32"])
     parser.add_argument("--max-model-len", type=int, default=8192)
@@ -679,6 +695,8 @@ def main() -> int:
         if getattr(args, "caption_include", "none") == "none":
             # Caption-only REVISE needs at least shown captions to be meaningful.
             args.caption_include = "shown"
+    if args.base_url and args.start_server:
+        raise ValueError("--base-url cannot be combined with --start-server.")
 
     random.seed(args.seed)
     rng = random.Random(args.seed)
@@ -688,9 +706,10 @@ def main() -> int:
         if args.start_server:
             server_proc = _start_vllm_server(args)
             wait_port(args.host, args.port, timeout_s=args.server_timeout_s)
+            wait_for_server(args.host, args.port, timeout_s=args.server_timeout_s)
 
-        base_url = f"http://{args.host}:{args.port}"
-        model_id = get_model_id(base_url)
+        base_url = resolve_base_url(args.base_url, args.host, args.port)
+        model_id = get_model_id(base_url, model_id=args.model_id)
 
         samples = _load_nextqa_samples(
             csv_path=args.csv,
@@ -1366,7 +1385,8 @@ def main() -> int:
                         pass
                     server_proc = _start_vllm_server(args)
                     wait_port(args.host, args.port, timeout_s=args.server_timeout_s)
-                    model_id = get_model_id(base_url)
+                    wait_for_server(args.host, args.port, timeout_s=args.server_timeout_s)
+                    model_id = get_model_id(base_url, model_id=args.model_id)
 
             if args.progress_interval > 0 and processed % args.progress_interval == 0:
                 elapsed = time.time() - start_eval

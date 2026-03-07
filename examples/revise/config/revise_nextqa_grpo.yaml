@@ -25,7 +25,7 @@ data:
 
 actor_rollout_ref:
   model:
-    path: Qwen/Qwen2.5-VL-3B-Instruct
+    path: ${oc.env:REVISE_QWEN25_VL_3B_PATH,/shares/hlw3876/chenwei/hf_cache/models--Qwen--Qwen2.5-VL-3B-Instruct/snapshots/66285546d2b821cf421d4f5eb2576359d3770cd3}
   actor:
     optim:
       lr: 1e-6

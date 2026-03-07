@@ -660,17 +660,37 @@ def wait_port(host: str, port: int, timeout_s: int = 300) -> None:
     raise TimeoutError(f"Timed out waiting for {host}:{port} to accept connections after {timeout_s}s")
 
 
-def wait_for_server(host: str, port: int, timeout_s: int) -> None:
+def get_api_headers(api_key: str | None = None) -> dict[str, str]:
+    """Build auth headers for OpenAI-compatible APIs from args or environment."""
+    token = (
+        api_key
+        or os.getenv("REVISE_API_KEY")
+        or os.getenv("OPENAI_API_KEY")
+        or os.getenv("VLLM_API_KEY")
+        or ""
+    ).strip()
+    return {"Authorization": f"Bearer {token}"} if token else {}
+
+
+def resolve_base_url(base_url: str | None = None, host: str = "127.0.0.1", port: int = 8000) -> str:
+    """Resolve an OpenAI-compatible API base URL."""
+    if base_url:
+        return str(base_url).rstrip("/")
+    return f"http://{host}:{port}"
+
+
+def wait_for_server(host: str, port: int, timeout_s: int, *, base_url: str | None = None) -> None:
     """Wait until the vLLM OpenAI server is actually ready (polls ``/v1/models``).
 
     vLLM can open the TCP port before the model is fully initialized; issuing a chat
     request too early can return transient HTTP 400/503 errors.
     """
-    base_url = f"http://{host}:{port}"
+    base_url = resolve_base_url(base_url, host, port)
+    headers = get_api_headers()
     start = time.time()
     while time.time() - start < timeout_s:
         try:
-            resp = requests.get(f"{base_url}/v1/models", timeout=1.0)
+            resp = requests.get(f"{base_url}/v1/models", headers=headers, timeout=1.0)
             if resp.status_code == 200:
                 return
         except Exception:
@@ -679,9 +699,19 @@ def wait_for_server(host: str, port: int, timeout_s: int) -> None:
     raise TimeoutError(f"vLLM server did not become ready at {host}:{port} within {timeout_s}s")
 
 
-def get_model_id(base_url: str, timeout: int = 30) -> str:
+def get_model_id(base_url: str, timeout: int = 30, model_id: str | None = None) -> str:
     """Fetch the model ID from a running vLLM/OpenAI-compatible server."""
-    resp = requests.get(f"{base_url}/v1/models", timeout=timeout)
+    explicit_model_id = (
+        model_id
+        or os.getenv("REVISE_MODEL_ID")
+        or os.getenv("OPENAI_MODEL")
+        or os.getenv("OPENAI_API_MODEL")
+        or ""
+    ).strip()
+    if explicit_model_id:
+        return explicit_model_id
+
+    resp = requests.get(f"{base_url}/v1/models", headers=get_api_headers(), timeout=timeout)
     resp.raise_for_status()
     data = resp.json()
     models = data.get("data", [])

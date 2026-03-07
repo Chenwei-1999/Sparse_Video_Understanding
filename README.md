@@ -84,6 +84,16 @@ pip install -e ".[gpu]"
 
 ## Quickstart
 
+Paper-level reproduction entrypoints:
+
+```bash
+ENV_NAME=verlrun INSTALL_BACKENDS=vllm bash scripts/repro/setup_env.sh
+python scripts/repro/doctor.py
+python scripts/repro/paper_suite.py list
+```
+
+See [paper/REPRODUCE.md](paper/REPRODUCE.md) for the full experiment matrix, environment variables, and known blockers.
+
 ### Plug-and-play evaluation (NExT-QA)
 
 ```bash

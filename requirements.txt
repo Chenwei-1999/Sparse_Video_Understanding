@@ -13,9 +13,10 @@ peft
 pyarrow>=19.0.0
 pybind11
 pylatexenc
+scikit-learn
 pre-commit
 ray[default]
-tensordict>=0.8.0,!=0.9.0,<=0.11.0
+tensordict>=0.8.0,!=0.9.0,<=0.10.0
 torchdata
 transformers
 # vllm>=0.11.0

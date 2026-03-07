@@ -13,10 +13,16 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Optional
 
 import requests
 from PIL import Image
+
+# Allow direct execution via `python examples/...py`.
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 try:
     import wandb  # type: ignore
@@ -37,6 +43,7 @@ from examples.revise.pnp_utils import (
     extract_tag,
     format_intervals,
     format_frame_list,
+    get_api_headers,
     get_model_id,
     in_intervals,
     indices_to_intervals,
@@ -45,11 +52,13 @@ from examples.revise.pnp_utils import (
     normalize_answer_letter,
     parse_int_list,
     propose_candidate_frames,
+    resolve_base_url,
     sample_uniform_indices,
     stop_server,
     summary_has_ohrpu,
     unseen_intervals,
     wait_port,
+    wait_for_server,
 )
 
 
@@ -155,7 +164,12 @@ def _call_chat_completions(
         "top_p": float(top_p),
         "max_tokens": int(max_tokens),
     }
-    resp = requests.post(f"{base_url}/v1/chat/completions", json=payload, timeout=timeout_s)
+    resp = requests.post(
+        f"{base_url}/v1/chat/completions",
+        headers=get_api_headers(),
+        json=payload,
+        timeout=timeout_s,
+    )
     resp.raise_for_status()
     data = resp.json()
     return str(data["choices"][0]["message"]["content"])
@@ -287,7 +301,16 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--model-path", required=True, help="HF model id or local snapshot path")
     parser.add_argument("--video-root", required=True, help="Root directory containing videos referenced by JSON")
-    parser.add_argument("--json", required=True, help="EgoSchema JSON list (e.g., pnp_subset_500.json)")
+    parser.add_argument(
+        "--json",
+        required=True,
+        help="Local MC video-QA JSON list (e.g., EgoSchema subset or VideoEspresso bench_hard.json).",
+    )
+    parser.add_argument(
+        "--dataset-name",
+        default="egoschema",
+        help="Dataset label for summaries/logging (e.g., egoschema, videoespresso).",
+    )
     parser.add_argument("--max-samples", type=int, default=500)
     parser.add_argument("--num-shards", type=int, default=1, help="Shard the dataset for data-parallel evaluation.")
     parser.add_argument("--shard-idx", type=int, default=0, help="Shard index in [0, num_shards).")
@@ -328,6 +351,8 @@ def main() -> int:
     parser.add_argument("--seed", type=int, default=1234)
     parser.add_argument("--host", type=str, default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--base-url", default=None, help="OpenAI-compatible API base URL. Defaults to http://host:port.")
+    parser.add_argument("--model-id", default=None, help="Explicit remote model ID for chat completions.")
     parser.add_argument("--tensor-parallel-size", type=int, default=4)
     parser.add_argument("--dtype", type=str, choices=["bfloat16", "float16", "float32"], default="bfloat16")
     parser.add_argument("--max-model-len", type=int, default=12288)
@@ -365,7 +390,7 @@ def main() -> int:
         help="If no <answer> is produced within max rounds, issue a final answer-only request.",
     )
     parser.add_argument("--use-wandb", action="store_true", help="Log eval metrics to Weights & Biases.")
-    parser.add_argument("--wandb-project", type=str, default="revise_egoschema")
+    parser.add_argument("--wandb-project", type=str, default=None)
     parser.add_argument("--wandb-entity", type=str, default=None)
     parser.add_argument("--wandb-name", type=str, default=None)
     parser.add_argument("--wandb-group", type=str, default=None)
@@ -378,6 +403,10 @@ def main() -> int:
         raise ValueError("--num-shards must be >= 1")
     if not (0 <= args.shard_idx < args.num_shards):
         raise ValueError("--shard-idx must be in [0, num_shards)")
+    if args.base_url and args.start_server:
+        raise ValueError("--base-url cannot be combined with --start-server.")
+    if not args.wandb_project:
+        args.wandb_project = f"revise_{str(args.dataset_name).strip().lower() or 'local_mc'}"
 
     rng = random.Random(args.seed)
 
@@ -394,7 +423,8 @@ def main() -> int:
         os.makedirs(os.path.dirname(log_jsonl) or ".", exist_ok=True)
 
     summary: dict[str, Any] = {
-        "task": "revise_plug_and_play_egoschema_vllm",
+        "task": f"revise_plug_and_play_{str(args.dataset_name).strip().lower()}_vllm",
+        "dataset_name": args.dataset_name,
         "dataset_json": args.json,
         "video_root": args.video_root,
         "model_path": args.model_path,
@@ -422,7 +452,7 @@ def main() -> int:
     wandb_run = maybe_init_wandb(args, summary)
 
     server_proc: Optional[subprocess.Popen[str]] = None
-    base_url = f"http://{args.host}:{args.port}"
+    base_url = resolve_base_url(args.base_url, args.host, args.port)
     model_id: Optional[str] = None
 
     def _ensure_server() -> None:
@@ -430,8 +460,9 @@ def main() -> int:
         if args.start_server and server_proc is None:
             server_proc = _start_vllm_server(args)
             wait_port(args.host, args.port, timeout_s=args.server_timeout_s)
+            wait_for_server(args.host, args.port, timeout_s=args.server_timeout_s)
         if model_id is None:
-            model_id = get_model_id(base_url)
+            model_id = get_model_id(base_url, model_id=args.model_id)
 
     def _restart_server() -> None:
         nonlocal server_proc, model_id
@@ -442,7 +473,8 @@ def main() -> int:
         if args.start_server:
             server_proc = _start_vllm_server(args)
             wait_port(args.host, args.port, timeout_s=args.server_timeout_s)
-            model_id = get_model_id(base_url)
+            wait_for_server(args.host, args.port, timeout_s=args.server_timeout_s)
+            model_id = get_model_id(base_url, model_id=args.model_id)
 
     # Resume logic
     done_ids: set[str] = set()

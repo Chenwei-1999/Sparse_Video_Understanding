@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import random
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,6 +16,11 @@ import torch
 from datasets import load_dataset
 from PIL import Image
 from transformers import AutoModelForCausalLM, AutoProcessor
+
+# Allow direct execution via `python examples/...py`.
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from examples.revise.pnp_utils import (
     ANSWER_RE,

@@ -2,6 +2,15 @@
 
 This directory provides a REVISE-style multi-round agent loop, dataset loader, and configs for NExT-QA experiments.
 
+For paper-wide reproduction across NExT-QA / VideoEspresso / EgoSchema / LVBench / Video-MME, use:
+
+```bash
+python scripts/repro/doctor.py
+python scripts/repro/paper_suite.py check --all
+```
+
+The paper-specific workflow is documented in [paper/REPRODUCE.md](../../paper/REPRODUCE.md).
+
 ## Data
 - NExT-QA root: `/shares/hlw3876/chenwei/NExT-QA`
 - Videos: `/shares/hlw3876/chenwei/NExT-QA/NExTVideo`

@@ -19,6 +19,11 @@ import requests
 from datasets import load_dataset
 from PIL import Image
 
+# Allow direct execution via `python examples/...py`.
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 from examples.revise.pnp_prompts import SYSTEM_PROMPT_WITH_THINK as DEFAULT_SYSTEM_PROMPT_WITH_THINK
 from examples.revise.pnp_utils import (
     ANSWER_RE,
@@ -32,6 +37,8 @@ from examples.revise.pnp_utils import (
     extract_tag,
     extract_video_info,
     format_question_block,
+    get_api_headers,
+    get_model_id,
     maybe_init_wandb,
     maybe_log_jsonl,
     normalize_answer_letter,
@@ -40,6 +47,7 @@ from examples.revise.pnp_utils import (
     parse_time_reference_range,
     pick_free_port,
     propose_candidate_frames,
+    resolve_base_url,
     sample_uniform_indices_inclusive,
     shard_by_video,
     stable_sample_id_dataset,
@@ -136,7 +144,12 @@ def _chat_once(
         "top_p": top_p,
         "max_tokens": max_tokens,
     }
-    resp = requests.post(f"{base_url}/v1/chat/completions", json=payload, timeout=timeout_s)
+    resp = requests.post(
+        f"{base_url}/v1/chat/completions",
+        headers=get_api_headers(),
+        json=payload,
+        timeout=timeout_s,
+    )
     try:
         resp.raise_for_status()
     except requests.HTTPError as e:
@@ -347,6 +360,8 @@ def main() -> None:
     ap.add_argument("--model-path", required=True)
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=0)
+    ap.add_argument("--base-url", default=None, help="OpenAI-compatible API base URL. Defaults to http://host:port.")
+    ap.add_argument("--model-id", default=None, help="Explicit remote model ID for chat completions.")
     ap.add_argument("--start-server", action="store_true")
     ap.add_argument("--restart-server-on-failure", action="store_true")
     ap.add_argument("--server-log", default="")
@@ -390,6 +405,8 @@ def main() -> None:
     )
 
     args = ap.parse_args()
+    if args.base_url and args.start_server:
+        raise ValueError("--base-url cannot be combined with --start-server.")
 
     if args.port <= 0:
         args.port = pick_free_port()
@@ -510,8 +527,8 @@ def main() -> None:
     }
     run = maybe_init_wandb(args, run_config)
 
-    base_url = f"http://{args.host}:{args.port}"
-    model_id = args.model_path
+    base_url = resolve_base_url(args.base_url, args.host, args.port)
+    model_id = get_model_id(base_url, model_id=args.model_id)
     system_prompt = DEFAULT_SYSTEM_PROMPT_WITH_THINK.format(max_frames_per_round=args.max_frames_per_round)
 
     rng = random.Random(42 + int(args.shard_idx))
@@ -522,7 +539,7 @@ def main() -> None:
         nonlocal correct, total_rounds, invalid_outputs, invalid_action_terminated, failed
         nonlocal total_model_calls, total_retries, total_effective_rounds, think_present
         nonlocal missing_summary, answered, total_frames_used_all, total_frames_used_answered
-        nonlocal server_proc
+        nonlocal server_proc, model_id
 
         cache_dir = Path(args.video_cache_dir) / sample.dataset
         cache_dir.mkdir(parents=True, exist_ok=True)
@@ -699,6 +716,7 @@ def main() -> None:
                             stop_server(server_proc)
                         server_proc = _start_vllm_server(args)
                         wait_for_server(args.host, args.port, timeout_s=240)
+                        model_id = get_model_id(base_url, model_id=args.model_id)
                         retry_feedback = f"Server error; please retry. ({err_txt})"
                         total_retries += 1
                         if retry_idx < args.max_retries_per_round:

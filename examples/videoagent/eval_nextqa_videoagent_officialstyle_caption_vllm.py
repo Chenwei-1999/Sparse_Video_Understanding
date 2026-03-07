@@ -7,13 +7,24 @@ import json
 import os
 import random
 import re
+import sys
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Optional
 
 import numpy as np
 import requests
-from sklearn.feature_extraction.text import TfidfVectorizer
+
+# Allow direct execution via `python examples/...py`.
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+try:
+    from sklearn.feature_extraction.text import TfidfVectorizer
+except Exception:  # pragma: no cover
+    TfidfVectorizer = None
 
 try:
     import wandb  # type: ignore
@@ -22,15 +33,19 @@ except Exception:  # pragma: no cover
 
 from examples.revise.plug_and_play_nextqa_vllm import (  # noqa: E402
     _chat_once,
-    _get_model_id,
     _load_nextqa_samples,
     _load_video_captions,
-    _maybe_log_jsonl,
     _start_vllm_server,
-    _stop_server,
-    _truncate_text,
-    _wait_port,
-    _wandb_log,
+)
+from examples.revise.pnp_utils import (  # noqa: E402
+    get_model_id as _get_model_id,
+    maybe_log_jsonl as _maybe_log_jsonl,
+    resolve_base_url as _resolve_base_url,
+    stop_server as _stop_server,
+    truncate_text as _truncate_text,
+    wait_port as _wait_port,
+    wait_for_server as _wait_for_server,
+    wandb_log as _wandb_log,
 )
 
 
@@ -177,6 +192,8 @@ def _build_segments_from_seen(seen: list[int], max_idx: int) -> list[Segment]:
 
 
 def _build_video_tfidf(caption_texts: list[str]) -> tuple[TfidfVectorizer, Any]:
+    if TfidfVectorizer is None:
+        raise ImportError("scikit-learn is required for VideoAgent caption retrieval. Install `scikit-learn`.")
     vectorizer = TfidfVectorizer(stop_words="english", max_features=10000)
     matrix = vectorizer.fit_transform([t or "" for t in caption_texts])
     return vectorizer, matrix
@@ -437,6 +454,8 @@ def main() -> int:
 
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=18200)
+    ap.add_argument("--base-url", default=None, help="OpenAI-compatible API base URL. Defaults to http://host:port.")
+    ap.add_argument("--model-id", default=None, help="Explicit remote model ID for chat completions.")
     ap.add_argument("--tensor-parallel-size", type=int, default=1)
     ap.add_argument("--dtype", default="bfloat16", choices=["bfloat16", "float16", "float32"])
     ap.add_argument("--max-model-len", type=int, default=12288)
@@ -461,6 +480,8 @@ def main() -> int:
     args = ap.parse_args()
     if not os.path.isdir(args.captions_dir):
         raise ValueError(f"--captions-dir does not exist or is not a directory: {args.captions_dir}")
+    if args.base_url and args.start_server:
+        raise ValueError("--base-url cannot be combined with --start-server.")
 
     random.seed(args.seed)
     rng = random.Random(args.seed)
@@ -471,9 +492,10 @@ def main() -> int:
         if args.start_server:
             server_proc = _start_vllm_server(args)
             _wait_port(args.host, args.port, timeout_s=args.server_timeout_s)
+            _wait_for_server(args.host, args.port, timeout_s=args.server_timeout_s)
 
-        base_url = f"http://{args.host}:{args.port}"
-        model_id = _get_model_id(base_url)
+        base_url = _resolve_base_url(args.base_url, args.host, args.port)
+        model_id = _get_model_id(base_url, model_id=args.model_id)
 
         samples = _load_nextqa_samples(
             csv_path=args.csv,
@@ -734,7 +756,8 @@ def main() -> int:
                         pass
                     server_proc = _start_vllm_server(args)
                     _wait_port(args.host, args.port, timeout_s=args.server_timeout_s)
-                    model_id = _get_model_id(base_url)
+                    _wait_for_server(args.host, args.port, timeout_s=args.server_timeout_s)
+                    model_id = _get_model_id(base_url, model_id=args.model_id)
                 _maybe_log_jsonl(
                     args.log_jsonl,
                     {

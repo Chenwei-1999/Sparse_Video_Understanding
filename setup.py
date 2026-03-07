@@ -31,13 +31,14 @@ install_requires = [
     "hydra-core",
     "imageio",
     "imageio-ffmpeg",
-    "numpy<2.0.0",
+    "numpy<3.0.0",
     "pandas",
     "peft",
     "pyarrow>=19.0.0",
     "pybind11",
     "pylatexenc",
     "ray[default]>=2.41.0",
+    "scikit-learn",
     "torchdata",
     "tensordict>=0.8.0,<=0.10.0,!=0.9.0",
     "transformers",
@@ -51,7 +52,7 @@ PRIME_REQUIRES = ["pyext"]
 GEO_REQUIRES = ["mathruler", "torchvision", "qwen_vl_utils"]
 GPU_REQUIRES = ["liger-kernel", "flash-attn"]
 MATH_REQUIRES = ["math-verify"]  # Add math-verify as an optional dependency
-VLLM_REQUIRES = ["tensordict>=0.8.0,<=0.10.0,!=0.9.0", "vllm>=0.8.5,<=0.12.0"]
+VLLM_REQUIRES = ["tensordict>=0.8.0,<=0.10.0,!=0.9.0", "vllm==0.14.1"]
 SGLANG_REQUIRES = [
     "tensordict>=0.8.0,<=0.10.0,!=0.9.0",
     "sglang[srt,openai]==0.5.6",

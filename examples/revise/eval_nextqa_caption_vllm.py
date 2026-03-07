@@ -11,19 +11,28 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Optional
 
 import pandas as pd
 
+# Allow direct execution via `python examples/...py`.
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 from examples.revise.pnp_utils import (
     ANSWER_RE,
+    get_api_headers,
     get_model_id,
     maybe_log_jsonl,
     normalize_video_id,
+    resolve_base_url,
     stable_sample_id_nextqa,
     stop_server,
     truncate_text,
     wait_port,
+    wait_for_server,
 )
 
 try:
@@ -65,7 +74,12 @@ def _chat_once(
         "top_p": top_p,
         "max_tokens": max_tokens,
     }
-    resp = requests.post(f"{base_url}/v1/chat/completions", json=payload, timeout=timeout_s)
+    resp = requests.post(
+        f"{base_url}/v1/chat/completions",
+        headers=get_api_headers(),
+        json=payload,
+        timeout=timeout_s,
+    )
     resp.raise_for_status()
     data = resp.json()
     return data["choices"][0]["message"]["content"]
@@ -280,6 +294,8 @@ def main() -> int:
 
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=19000)
+    ap.add_argument("--base-url", default=None, help="OpenAI-compatible API base URL. Defaults to http://host:port.")
+    ap.add_argument("--model-id", default=None, help="Explicit remote model ID for chat completions.")
     ap.add_argument("--tensor-parallel-size", type=int, default=1)
     ap.add_argument("--dtype", default="bfloat16", choices=["bfloat16", "float16", "float32"])
     ap.add_argument("--max-model-len", type=int, default=12288)
@@ -302,6 +318,8 @@ def main() -> int:
     args = ap.parse_args()
     if not os.path.isdir(args.captions_dir):
         raise ValueError(f"--captions-dir does not exist or is not a directory: {args.captions_dir}")
+    if args.base_url and args.start_server:
+        raise ValueError("--base-url cannot be combined with --start-server.")
 
     random.seed(args.seed)
 
@@ -311,9 +329,10 @@ def main() -> int:
         if args.start_server:
             server_proc = _start_vllm_server(args)
             wait_port(args.host, args.port, timeout_s=args.server_timeout_s)
+            wait_for_server(args.host, args.port, timeout_s=args.server_timeout_s)
 
-        base_url = f"http://{args.host}:{args.port}"
-        model_id = get_model_id(base_url)
+        base_url = resolve_base_url(args.base_url, args.host, args.port)
+        model_id = get_model_id(base_url, model_id=args.model_id)
 
         samples = _load_nextqa_samples(
             csv_path=args.csv,

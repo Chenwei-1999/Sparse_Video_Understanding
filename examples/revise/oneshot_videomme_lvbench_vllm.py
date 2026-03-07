@@ -6,26 +6,36 @@ import argparse
 import json
 import os
 import random
+import sys
 import time
 from pathlib import Path
 from typing import Any, Optional
 
+# Allow direct execution via `python examples/...py`.
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 from examples.revise.plug_and_play_videomme_lvbench_vllm import (
     _chat_once,
-    _extract_frames_1fps,
-    _extract_video_info,
-    _format_question_block,
     _load_lvbench_samples,
     _load_videomme_samples,
-    _normalize_answer_letter,
-    _parse_time_reference_range,
-    _pick_free_port,
-    _sample_uniform_indices_inclusive,
-    _shard_by_video,
     _start_vllm_server,
-    _stop_server,
-    _timeline_len_1fps,
-    _wait_for_server,
+)
+from examples.revise.pnp_utils import (
+    extract_frames_1fps as _extract_frames_1fps,
+    extract_video_info as _extract_video_info,
+    format_question_block as _format_question_block,
+    get_model_id as _get_model_id,
+    normalize_answer_letter as _normalize_answer_letter,
+    parse_time_reference_range as _parse_time_reference_range,
+    pick_free_port as _pick_free_port,
+    resolve_base_url as _resolve_base_url,
+    sample_uniform_indices_inclusive as _sample_uniform_indices_inclusive,
+    shard_by_video as _shard_by_video,
+    stop_server as _stop_server,
+    timeline_len_1fps as _timeline_len_1fps,
+    wait_for_server as _wait_for_server,
 )
 
 
@@ -63,6 +73,8 @@ def main() -> None:
     ap.add_argument("--model-path", required=True)
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=0)
+    ap.add_argument("--base-url", default=None, help="OpenAI-compatible API base URL. Defaults to http://host:port.")
+    ap.add_argument("--model-id", default=None, help="Explicit remote model ID for chat completions.")
     ap.add_argument("--start-server", action="store_true")
     ap.add_argument("--restart-server-on-failure", action="store_true")
     ap.add_argument("--server-log", default="")
@@ -85,6 +97,8 @@ def main() -> None:
     ap.add_argument("--resume-from-log", action="store_true")
 
     args = ap.parse_args()
+    if args.base_url and args.start_server:
+        raise ValueError("--base-url cannot be combined with --start-server.")
 
     if args.port <= 0:
         args.port = _pick_free_port()
@@ -156,13 +170,14 @@ def main() -> None:
             print(f"[resume] detected {resume_completed} completed samples in {args.log_jsonl}", flush=True)
             samples = samples[resume_completed:]
 
-    base_url = f"http://{args.host}:{args.port}"
-    model_id = args.model_path
+    base_url = _resolve_base_url(args.base_url, args.host, args.port)
 
     server_proc = None
     if args.start_server:
         server_proc = _start_vllm_server(args)
         _wait_for_server(args.host, args.port, timeout_s=240)
+
+    model_id = _get_model_id(base_url, model_id=args.model_id)
 
     rng = random.Random(1337 + int(args.shard_idx))
     start_t = time.time()
@@ -226,6 +241,7 @@ def main() -> None:
                     pass
                 server_proc = _start_vllm_server(args)
                 _wait_for_server(args.host, args.port, timeout_s=240)
+                model_id = _get_model_id(base_url, model_id=args.model_id)
                 try:
                     out = _chat_once(
                         base_url=base_url,
