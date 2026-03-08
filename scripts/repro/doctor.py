@@ -41,8 +41,9 @@ def build_report() -> dict:
         text=True,
         check=False,
     )
-    pip_check_lines = [line.strip() for line in (pip_check.stdout or pip_check.stderr or "").splitlines() if line.strip()]
-    if pip_check_lines:
+    pip_check_output = "\n".join(part for part in (pip_check.stdout, pip_check.stderr) if part)
+    pip_check_lines = [line.strip() for line in pip_check_output.splitlines() if line.strip()]
+    if pip_check.returncode != 0:
         warnings.append("`python -m pip check` reported dependency conflicts in this environment.")
 
     nextqa = assets["datasets"]["nextqa"]

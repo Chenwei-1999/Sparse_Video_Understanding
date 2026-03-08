@@ -22,7 +22,7 @@ from verl.base_config import BaseConfig
 from verl.utils import hf_processor, hf_tokenizer
 from verl.utils.fs import copy_to_local
 from verl.utils.import_utils import import_external_libs
-from verl.utils.model import get_generation_config, update_model_config
+from verl.utils.model import get_generation_config, resolve_attn_implementation, update_model_config
 
 __all__ = ["HFModelConfig"]
 
@@ -125,7 +125,7 @@ class HFModelConfig(BaseConfig):
         )
 
         # construct hf_config
-        attn_implementation = self.override_config.get("attn_implementation", "flash_attention_2")
+        attn_implementation = resolve_attn_implementation(self.override_config.get("attn_implementation"))
         self.hf_config = AutoConfig.from_pretrained(
             self.local_hf_config_path, trust_remote_code=self.trust_remote_code, attn_implementation=attn_implementation
         )

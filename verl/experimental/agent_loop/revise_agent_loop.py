@@ -87,16 +87,51 @@ def _propose_candidate_unseen_frames(
 def _load_video_meta(video_path: str) -> tuple[Optional[int], Optional[float]]:
     # Returns (frame_count, fps)
     try:
+        import decord
+
+        vr = decord.VideoReader(video_path, ctx=decord.cpu(0))
+        frame_count = _safe_nonnegative_int(len(vr))
+        fps = _safe_positive_float(vr.get_avg_fps())
+        if frame_count is not None or fps is not None:
+            return frame_count, fps
+    except Exception:
+        pass
+
+    try:
         import imageio
 
         reader = imageio.get_reader(video_path, "ffmpeg")
         meta = reader.get_meta_data()
-        fps = meta.get("fps")
-        nframes = meta.get("nframes")
+        fps = _safe_positive_float(meta.get("fps"))
+        nframes = _safe_nonnegative_int(meta.get("nframes"))
+        if nframes is None:
+            duration = _safe_positive_float(meta.get("duration"))
+            if duration is not None and fps is not None:
+                nframes = max(1, int(math.ceil(duration * fps)))
         reader.close()
         return nframes, fps
     except Exception:
         return None, None
+
+
+def _safe_nonnegative_int(value: Any) -> Optional[int]:
+    try:
+        number = float(value)
+    except Exception:
+        return None
+    if not math.isfinite(number):
+        return None
+    return max(0, int(number))
+
+
+def _safe_positive_float(value: Any) -> Optional[float]:
+    try:
+        number = float(value)
+    except Exception:
+        return None
+    if not math.isfinite(number) or number <= 0:
+        return None
+    return number
 
 
 def _timeline_len_1fps(total_frames: int, fps: float) -> int:
@@ -324,7 +359,7 @@ class ReviseAgentLoop(AgentLoopBase):
         question = extra_info.get("question", "")
         choices = extra_info.get("choices", [])
         video_path = extra_info.get("video_path")
-        frame_count = int(extra_info.get("frame_count", 0))
+        frame_count = _safe_nonnegative_int(extra_info.get("frame_count", 0)) or 0
         time_reference = str(extra_info.get("time_reference") or "").strip()
 
         if not video_path:
@@ -336,14 +371,8 @@ class ReviseAgentLoop(AgentLoopBase):
         if self.use_1fps_timeline:
             # Action indices are seconds on a 1-fps timeline; map to raw video frames for decoding.
             total_frames, video_fps = _load_video_meta(video_path)
-            try:
-                total_frames = int(total_frames or 0)
-            except Exception:
-                total_frames = 0
-            try:
-                video_fps = float(video_fps or 0.0)
-            except Exception:
-                video_fps = 0.0
+            total_frames = _safe_nonnegative_int(total_frames) or 0
+            video_fps = _safe_positive_float(video_fps) or 0.0
             if video_fps <= 0:
                 video_fps = 30.0
             if frame_count <= 0:
@@ -352,7 +381,7 @@ class ReviseAgentLoop(AgentLoopBase):
             # If frame count missing, try to load from video metadata.
             if frame_count <= 0:
                 frame_count, video_fps = _load_video_meta(video_path)
-                frame_count = int(frame_count or 0)
+                frame_count = _safe_nonnegative_int(frame_count) or 0
 
         def _extract_action_frames(indices: list[int]) -> tuple[list[Image.Image], Optional[float]]:
             if not indices:

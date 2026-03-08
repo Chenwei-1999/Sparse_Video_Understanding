@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 import hashlib
 import json
 import os
@@ -14,6 +15,12 @@ from typing import Any, Iterable
 
 import torch
 from torch.utils.data import Dataset
+
+try:
+    from omegaconf import DictConfig, OmegaConf
+except Exception:  # pragma: no cover - OmegaConf is available in training envs
+    DictConfig = None
+    OmegaConf = None
 
 
 def _format_question(question: str, choices: list[str]) -> str:
@@ -62,18 +69,40 @@ def _resolve_video_path(video_root: str, rel_video: str) -> str | None:
     if os.path.isabs(rel_video):
         candidates.append(rel_video)
     else:
+        norm_rel = rel_video.lstrip("./")
         candidates.extend(
             [
-                os.path.join(video_root, rel_video),
-                os.path.join(video_root, "all_video", rel_video),
-                os.path.join(video_root, "train_video", "all_video", rel_video),
-                os.path.join(video_root, "test_video", "all_video", rel_video),
+                os.path.join(video_root, norm_rel),
+                os.path.join(video_root, "all_video", norm_rel),
+                os.path.join(video_root, "train_video", "all_video", norm_rel),
+                os.path.join(video_root, "test_video", "all_video", norm_rel),
+                os.path.join(video_root, "videos", "videos", os.path.basename(norm_rel)),
             ]
         )
+        if norm_rel.startswith("all_video/"):
+            suffix = norm_rel[len("all_video/") :]
+            candidates.extend(
+                [
+                    os.path.join(video_root, "train_video", norm_rel),
+                    os.path.join(video_root, "test_video", norm_rel),
+                    os.path.join(video_root, "train_video", "all_video", suffix),
+                    os.path.join(video_root, "test_video", "all_video", suffix),
+                ]
+            )
     for path in candidates:
         if os.path.exists(path):
             return path
     return None
+
+
+def _to_mapping(config: Any) -> Mapping[str, Any]:
+    if isinstance(config, Mapping):
+        return config
+    if DictConfig is not None and isinstance(config, DictConfig) and OmegaConf is not None:
+        container = OmegaConf.to_container(config, resolve=False)
+        if isinstance(container, Mapping):
+            return container
+    return {}
 
 
 class LocalMCDataset(Dataset):
@@ -90,6 +119,7 @@ class LocalMCDataset(Dataset):
         self.config = config or {}
         self.tokenizer = tokenizer
         self.processor = processor
+        config_map = _to_mapping(config)
 
         if isinstance(data_files, (list, tuple)):
             files = [str(x) for x in data_files]
@@ -97,12 +127,12 @@ class LocalMCDataset(Dataset):
             files = [str(data_files)]
 
         cfg_max_samples = None
-        if isinstance(config, dict):
-            cfg_max_samples = config.get("max_samples")
+        if config_map:
+            cfg_max_samples = config_map.get("max_samples")
         if cfg_max_samples is not None:
             max_samples = int(cfg_max_samples)
 
-        local_cfg = (config or {}).get("local_mc", {}) if isinstance(config, dict) else {}
+        local_cfg = config_map.get("local_mc", {}) if config_map else {}
         video_root = str(local_cfg.get("video_root") or "").strip()
         dataset_name = str(local_cfg.get("dataset_name") or "local_mc").strip() or "local_mc"
 

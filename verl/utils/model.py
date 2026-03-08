@@ -40,6 +40,7 @@ from transformers import (
     PreTrainedModel,
 )
 from transformers.modeling_outputs import CausalLMOutputWithPast
+from transformers.utils import is_flash_attn_2_available
 
 from verl.models.registry import ModelRegistry
 from verl.utils.import_utils import is_trl_available
@@ -77,7 +78,12 @@ def get_huggingface_actor_config(model_name: str, override_config_kwargs=None, t
     assert isinstance(override_config_kwargs, dict), (
         f"override_config_kwargs must be a dict, got {type(override_config_kwargs)}"
     )
-    module_config = AutoConfig.from_pretrained(model_name, trust_remote_code=trust_remote_code)
+    attn_implementation = resolve_attn_implementation(override_config_kwargs.get("attn_implementation"))
+    module_config = AutoConfig.from_pretrained(
+        model_name,
+        trust_remote_code=trust_remote_code,
+        attn_implementation=attn_implementation,
+    )
     update_model_config(module_config, override_config_kwargs)
 
     return module_config
@@ -98,6 +104,17 @@ def get_generation_config(
             return GenerationConfig.from_model_config(config)
         except OSError:  # Not found
             return None
+
+
+def resolve_attn_implementation(attn_implementation: Optional[str]) -> str:
+    requested = attn_implementation or "flash_attention_2"
+    if requested in {"flash_attention_2", "flash_attention_3"} and not is_flash_attn_2_available():
+        warnings.warn(
+            f"`{requested}` requested but flash_attn is unavailable; falling back to `sdpa`.",
+            stacklevel=2,
+        )
+        return "sdpa"
+    return requested
 
 
 def create_huggingface_actor(model_name: str, override_config_kwargs=None, automodel_kwargs=None) -> nn.Module:
@@ -621,12 +638,14 @@ def patch_valuehead_model(model) -> None:
 def load_valuehead_model(local_path, torch_dtype, model_config, trust_remote_code):
     from transformers import AutoModelForCausalLM, AutoModelForTokenClassification, AutoModelForVision2Seq
 
+    attn_implementation = resolve_attn_implementation(getattr(model_config, "_attn_implementation", None))
+
     try:
         model = AutoModelForTokenClassification.from_pretrained(
             pretrained_model_name_or_path=local_path,
             torch_dtype=torch_dtype,
             config=model_config,
-            attn_implementation="flash_attention_2",
+            attn_implementation=attn_implementation,
             trust_remote_code=trust_remote_code,
         )
         return model
@@ -648,7 +667,7 @@ def load_valuehead_model(local_path, torch_dtype, model_config, trust_remote_cod
         pretrained_model_name_or_path=local_path,
         torch_dtype=torch_dtype,
         config=model_config,
-        attn_implementation="flash_attention_2",
+        attn_implementation=attn_implementation,
         trust_remote_code=trust_remote_code,
     )
     model = AutoModelForCausalLMWithValueHead.from_pretrained(ori_model)

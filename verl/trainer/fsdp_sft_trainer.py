@@ -76,6 +76,7 @@ from verl.utils.fsdp_utils import (
     init_fn,
 )
 from verl.utils.logger import log_with_rank
+from verl.utils.model import resolve_attn_implementation
 from verl.utils.profiler import log_gpu_memory_usage
 from verl.utils.py_functional import convert_to_regular_types
 from verl.utils.torch_dtypes import PrecisionType
@@ -282,7 +283,7 @@ class FSDPSFTTrainer:
                 local_model_path,
                 config=config,
                 torch_dtype=torch_dtype,
-                attn_implementation=os.environ.get("ATTN_IMPLEMENTATION", "flash_attention_2"),
+                attn_implementation=resolve_attn_implementation(os.environ.get("ATTN_IMPLEMENTATION")),
                 trust_remote_code=trust_remote_code,
             )
 

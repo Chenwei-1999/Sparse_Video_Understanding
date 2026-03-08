@@ -94,6 +94,38 @@ fi
 python -m pip install -e . --no-deps
 python -m pip install scikit-learn
 
+python - <<'PY'
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+
+def normalize_decord_wheel_tag() -> None:
+    try:
+        import decord  # noqa: F401
+    except Exception:
+        return
+
+    pure_py_tag = "Tag: py3-none-manylinux2010_x86_64"
+    dist_info_dirs = sorted(Path(sys.prefix, "lib").glob("python*/site-packages/decord-*.dist-info"))
+    for dist_info in dist_info_dirs:
+        wheel_file = dist_info / "WHEEL"
+        if not wheel_file.exists():
+            continue
+        text = wheel_file.read_text(encoding="utf-8")
+        if "Tag: cp36-cp36m-manylinux2010_x86_64" not in text:
+            continue
+        wheel_file.write_text(
+            text.replace("Tag: cp36-cp36m-manylinux2010_x86_64", pure_py_tag),
+            encoding="utf-8",
+        )
+        print(f"Normalized decord wheel tag in {wheel_file}")
+
+
+normalize_decord_wheel_tag()
+PY
+
 echo "Environment ready:"
 echo "  env: $ENV_NAME"
 echo "  python: $(python --version)"
