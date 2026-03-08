@@ -29,6 +29,9 @@ try:
 except Exception:  # pragma: no cover
     wandb = None
 
+
+_EGOSCHEMA_CHUNK_CACHE: dict[tuple[str, str], str | None] = {}
+
 from examples.revise.pnp_prompts import SYSTEM_PROMPT as DEFAULT_SYSTEM_PROMPT
 from examples.revise.pnp_utils import (
     ANSWER_RE,
@@ -60,6 +63,29 @@ from examples.revise.pnp_utils import (
     wait_port,
     wait_for_server,
 )
+
+
+def _parse_answer_idx(raw_answer: Any, num_choices: int) -> Optional[int]:
+    if raw_answer is None:
+        return None
+    text = str(raw_answer).strip()
+    if not text or text.lower() == "none":
+        return None
+    m = re.search(r"([A-E])", text.upper())
+    if m:
+        idx = ord(m.group(1)) - ord("A")
+        if 0 <= idx < num_choices:
+            return idx
+        return None
+    try:
+        idx = int(float(text))
+    except Exception:
+        return None
+    if 0 <= idx < num_choices:
+        return idx
+    if 1 <= idx <= num_choices:
+        return idx - 1
+    return None
 
 
 def _normalize_option_text(opt: str) -> str:
@@ -239,24 +265,91 @@ class EgoSchemaSample:
     frame_count: int
 
 
-def _load_egoschema_samples(
-    json_path: str,
+def _resolve_local_video_path(video_root: str, rel_path: str) -> str | None:
+    candidates = [
+        os.path.join(video_root, rel_path),
+        os.path.join(video_root, "all_video", rel_path),
+        os.path.join(video_root, "train_video", "all_video", rel_path),
+        os.path.join(video_root, "test_video", "all_video", rel_path),
+        os.path.join(video_root, "videos", "videos", os.path.basename(rel_path)),
+    ]
+    for video_path in candidates:
+        if os.path.exists(video_path):
+            return video_path
+    return None
+
+
+def _download_egoschema_video(
+    *,
     video_root: str,
-    max_samples: int,
-    seed: int,
+    video_filename: str,
+    repo_id: str,
+) -> str | None:
+    try:
+        from huggingface_hub import hf_hub_download, hf_hub_url, list_repo_files
+        import fsspec
+        import zipfile
+    except Exception:
+        return None
+    os.makedirs(video_root, exist_ok=True)
+    target_path = Path(video_root) / video_filename
+    try:
+        path = hf_hub_download(
+            repo_id=repo_id,
+            repo_type="dataset",
+            filename=video_filename,
+            local_dir=video_root,
+        )
+        if path and os.path.exists(path):
+            return str(path)
+    except Exception:
+        pass
+
+    chunk_repo = "VLM2Vec/egoschema"
+    cache_key = (chunk_repo, video_filename)
+    chunk_name = _EGOSCHEMA_CHUNK_CACHE.get(cache_key)
+    if chunk_name is None and cache_key not in _EGOSCHEMA_CHUNK_CACHE:
+        try:
+            chunk_names = sorted(
+                f
+                for f in list_repo_files(chunk_repo, repo_type="dataset")
+                if re.fullmatch(r"videos_chunked_\d+\.zip", os.path.basename(f))
+            )
+            member_name = f"videos/{video_filename}"
+            for candidate in chunk_names:
+                url = hf_hub_url(chunk_repo, filename=candidate, repo_type="dataset")
+                with fsspec.open(url, "rb", block_size=2 * 1024 * 1024) as remote_f:
+                    with zipfile.ZipFile(remote_f) as zf:
+                        if member_name in set(zf.namelist()):
+                            chunk_name = candidate
+                            break
+            _EGOSCHEMA_CHUNK_CACHE[cache_key] = chunk_name
+        except Exception:
+            _EGOSCHEMA_CHUNK_CACHE[cache_key] = None
+            chunk_name = None
+    if not chunk_name:
+        return None
+    try:
+        member_name = f"videos/{video_filename}"
+        url = hf_hub_url(chunk_repo, filename=chunk_name, repo_type="dataset")
+        with fsspec.open(url, "rb", block_size=2 * 1024 * 1024) as remote_f:
+            with zipfile.ZipFile(remote_f) as zf:
+                with zf.open(member_name) as src, open(target_path, "wb") as dst:
+                    shutil.copyfileobj(src, dst, length=1024 * 1024)
+    except Exception:
+        return None
+    return str(target_path) if target_path.exists() else None
+
+
+def _rows_to_egoschema_samples(
+    rows: list[dict[str, Any]],
+    video_root: str,
+    *,
+    allow_video_download: bool = False,
+    egoschema_video_repo: str = "VLM2Vec/egoschema-rawvideo",
 ) -> list[EgoSchemaSample]:
-    with open(json_path, "r", encoding="utf-8") as f:
-        data = json.load(f)
-    if not isinstance(data, list):
-        raise TypeError(f"Expected list in {json_path}, got {type(data)}")
-
-    rng = random.Random(seed)
-    if max_samples > 0 and len(data) > max_samples:
-        rng.shuffle(data)
-        data = data[:max_samples]
-
     samples: list[EgoSchemaSample] = []
-    for row in data:
+    for row in rows:
         if not isinstance(row, dict):
             continue
         qid = str(row.get("question_idx") or row.get("qid") or row.get("id") or "")
@@ -265,22 +358,21 @@ def _load_egoschema_samples(
         if not isinstance(options, list) or len(options) < 2:
             continue
         choices = [_normalize_option_text(o) for o in options]
-        correct = str(row.get("correct_answer") or row.get("answer") or "").strip()
-        m = re.search(r"([A-E])", correct.upper())
-        if not m:
+        answer_idx = _parse_answer_idx(row.get("correct_answer") or row.get("answer"), len(choices))
+        if answer_idx is None:
             continue
-        answer_idx = ord(m.group(1)) - ord("A")
         rel = str(row.get("video_path") or row.get("video") or "")
         if not rel:
             continue
-        video_path = os.path.join(video_root, rel)
-        if not os.path.exists(video_path):
-            # Try alternate: if the json stores only a filename, assume videos/videos/<id>.mp4
-            alt = os.path.join(video_root, "videos", "videos", os.path.basename(rel))
-            if os.path.exists(alt):
-                video_path = alt
-            else:
-                continue
+        video_path = _resolve_local_video_path(video_root, rel)
+        if video_path is None and allow_video_download:
+            video_path = _download_egoschema_video(
+                video_root=video_root,
+                video_filename=os.path.basename(rel),
+                repo_id=egoschema_video_repo,
+            )
+        if video_path is None:
+            continue
 
         sample_id = _stable_sample_id(video_path, question, choices, answer_idx)
         samples.append(
@@ -297,19 +389,119 @@ def _load_egoschema_samples(
     return samples
 
 
+def _load_egoschema_samples(
+    json_path: str,
+    video_root: str,
+    max_samples: int,
+    seed: int,
+    *,
+    allow_video_download: bool = False,
+    egoschema_video_repo: str = "VLM2Vec/egoschema-rawvideo",
+) -> list[EgoSchemaSample]:
+    with open(json_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    if not isinstance(data, list):
+        raise TypeError(f"Expected list in {json_path}, got {type(data)}")
+
+    rng = random.Random(seed)
+    if max_samples > 0 and len(data) > max_samples:
+        rng.shuffle(data)
+        data = data[:max_samples]
+    return _rows_to_egoschema_samples(
+        data,
+        video_root,
+        allow_video_download=allow_video_download,
+        egoschema_video_repo=egoschema_video_repo,
+    )
+
+
+def _load_egoschema_hf_samples(
+    *,
+    video_root: str,
+    max_samples: int,
+    seed: int,
+    hf_config: str,
+    allow_video_download: bool,
+    egoschema_video_repo: str,
+) -> list[EgoSchemaSample]:
+    try:
+        from datasets import load_dataset
+    except Exception as exc:
+        raise RuntimeError("datasets is required for EgoSchema HF fallback.") from exc
+
+    ds = load_dataset("VLM2Vec/egoschema", hf_config, split="test")
+    rows = list(ds)
+    rng = random.Random(seed)
+    if max_samples > 0 and len(rows) > max_samples:
+        rng.shuffle(rows)
+        rows = rows[:max_samples]
+
+    canon_rows: list[dict[str, Any]] = []
+    for row in rows:
+        options = row.get("option") or row.get("options") or []
+        if not isinstance(options, list):
+            continue
+        answer_idx = _parse_answer_idx(row.get("answer"), len(options))
+        if answer_idx is None:
+            continue
+        canon_rows.append(
+            {
+                "question_idx": row.get("question_idx"),
+                "question": row.get("question"),
+                "options": options,
+                "correct_answer": chr(ord("A") + int(answer_idx)),
+                "video_path": f"{row.get('video_idx')}.mp4",
+            }
+        )
+
+    return _rows_to_egoschema_samples(
+        canon_rows,
+        video_root,
+        allow_video_download=allow_video_download,
+        egoschema_video_repo=egoschema_video_repo,
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--model-path", required=True, help="HF model id or local snapshot path")
-    parser.add_argument("--video-root", required=True, help="Root directory containing videos referenced by JSON")
+    parser.add_argument("--video-root", default=None, help="Root directory containing videos referenced by JSON")
     parser.add_argument(
         "--json",
-        required=True,
+        default=None,
         help="Local MC video-QA JSON list (e.g., EgoSchema subset or VideoEspresso bench_hard.json).",
     )
     parser.add_argument(
         "--dataset-name",
         default="egoschema",
         help="Dataset label for summaries/logging (e.g., egoschema, videoespresso).",
+    )
+    parser.add_argument(
+        "--egoschema-source",
+        choices=["auto", "local", "hf"],
+        default="auto",
+        help="For EgoSchema only: use local assets, Hugging Face fallback, or auto-detect.",
+    )
+    parser.add_argument(
+        "--egoschema-hf-config",
+        default="Subset",
+        help="HF split config for EgoSchema fallback (default: Subset).",
+    )
+    parser.add_argument(
+        "--egoschema-video-cache-dir",
+        default=str(REPO_ROOT / "outputs" / "egoschema_hf" / "videos"),
+        help="Cache directory for EgoSchema videos downloaded from Hugging Face.",
+    )
+    parser.add_argument(
+        "--auto-download-egoschema-videos",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="When using EgoSchema HF fallback, download missing mp4s on demand.",
+    )
+    parser.add_argument(
+        "--egoschema-video-repo",
+        default="VLM2Vec/egoschema-rawvideo",
+        help="HF dataset repo containing EgoSchema mp4 files.",
     )
     parser.add_argument("--max-samples", type=int, default=500)
     parser.add_argument("--num-shards", type=int, default=1, help="Shard the dataset for data-parallel evaluation.")
@@ -409,10 +601,40 @@ def main() -> int:
         args.wandb_project = f"revise_{str(args.dataset_name).strip().lower() or 'local_mc'}"
 
     rng = random.Random(args.seed)
+    dataset_name = str(args.dataset_name).strip().lower()
 
-    samples = _load_egoschema_samples(args.json, args.video_root, args.max_samples, args.seed)
+    use_hf_egoschema = (
+        dataset_name == "egoschema"
+        and (
+            args.egoschema_source == "hf"
+            or (args.egoschema_source == "auto" and (not args.json or not args.video_root))
+        )
+    )
+    if use_hf_egoschema:
+        args.video_root = args.video_root or args.egoschema_video_cache_dir
+        samples = _load_egoschema_hf_samples(
+            video_root=str(args.video_root),
+            max_samples=args.max_samples,
+            seed=args.seed,
+            hf_config=str(args.egoschema_hf_config),
+            allow_video_download=bool(args.auto_download_egoschema_videos),
+            egoschema_video_repo=str(args.egoschema_video_repo),
+        )
+    else:
+        if not args.json or not args.video_root:
+            raise ValueError("--json and --video-root are required for local JSON datasets.")
+        samples = _load_egoschema_samples(
+            args.json,
+            args.video_root,
+            args.max_samples,
+            args.seed,
+            allow_video_download=False,
+            egoschema_video_repo=str(args.egoschema_video_repo),
+        )
     if args.num_shards > 1:
         samples = [s for i, s in enumerate(samples) if (i % args.num_shards) == args.shard_idx]
+    if not samples:
+        raise RuntimeError("No samples loaded (check dataset source, JSON, video cache, or HF video availability).")
 
     if args.candidate_k <= 0:
         args.candidate_k = max(12, args.max_frames_per_round * 4)
@@ -427,6 +649,10 @@ def main() -> int:
         "dataset_name": args.dataset_name,
         "dataset_json": args.json,
         "video_root": args.video_root,
+        "egoschema_source": args.egoschema_source if dataset_name == "egoschema" else "local",
+        "egoschema_hf_config": args.egoschema_hf_config if dataset_name == "egoschema" else None,
+        "auto_download_egoschema_videos": bool(args.auto_download_egoschema_videos) if dataset_name == "egoschema" else False,
+        "egoschema_video_repo": args.egoschema_video_repo if dataset_name == "egoschema" else None,
         "model_path": args.model_path,
         "engine": "vllm",
         "tensor_parallel_size": args.tensor_parallel_size,

@@ -13,6 +13,8 @@ set -euo pipefail
 
 PROJECT_DIR="$(pwd)"
 CONFIG_PATH="$PROJECT_DIR/examples/revise/config"
+PYTHON_BIN="${PYTHON_BIN:-python3}"
+TORCHRUN_BIN="${TORCHRUN_BIN:-torchrun}"
 
 SFT_INPUT="${SFT_INPUT:-$PROJECT_DIR/outputs/nextqa_pnp_7b_train_log.jsonl}"
 SFT_OUTPUT="${SFT_OUTPUT:-$PROJECT_DIR/outputs/sft_data/revise_sft.parquet}"
@@ -27,7 +29,7 @@ if [ ! -f "$TRAIN_FILE" ]; then
         exit 1
     fi
     echo "=== Generating SFT data ==="
-    python3 "$PROJECT_DIR/examples/revise/generate_sft_data.py" \
+    "$PYTHON_BIN" "$PROJECT_DIR/examples/revise/generate_sft_data.py" \
         --input "$SFT_INPUT" \
         --output "$SFT_OUTPUT"
 else
@@ -36,7 +38,7 @@ fi
 
 # Step 2: Run SFT training
 echo "=== Starting SFT training ==="
-torchrun --nproc_per_node="$N_GPUS" \
+"$TORCHRUN_BIN" --nproc_per_node="$N_GPUS" \
     -m verl.trainer.fsdp_sft_trainer \
     --config-path "$CONFIG_PATH" \
     --config-name revise_nextqa_sft \

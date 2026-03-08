@@ -110,3 +110,47 @@ For reproducibility tooling, install pinned backend/runtime packages first, then
 - Tags: pip, editable, dependency-resolution, environment
 
 ---
+## [LRN-20260307-006] best_practice
+
+**Logged**: 2026-03-07T22:58:00-06:00
+**Priority**: high
+**Status**: pending
+**Area**: infra
+
+### Summary
+EgoSchema HF fallback should extract only the requested mp4 from the public chunked zip archives instead of assuming a rawvideo repo contains every subset video.
+
+### Details
+The `VLM2Vec/egoschema` metadata split is small and public, but many `Subset` video IDs are not present as top-level files in `VLM2Vec/egoschema-rawvideo`. The public `videos_chunked_*.zip` archives in the main dataset repo do contain the required mp4s, and they can be accessed lazily with `fsspec` + `zipfile` over Hugging Face HTTP range requests. That makes on-demand EgoSchema video retrieval feasible without pre-downloading ~100 GB of archives.
+
+### Suggested Action
+Keep the EgoSchema fallback on the main chunked dataset repo, cache resolved chunk lookups, and extract only requested members into a local video cache.
+
+### Metadata
+- Source: conversation
+- Related Files: examples/revise/plug_and_play_egoschema_vllm.py
+- Tags: egoschema, huggingface, zip, lazy-download, reproducibility
+
+---
+## [LRN-20260307-007] best_practice
+
+**Logged**: 2026-03-07T22:58:00-06:00
+**Priority**: high
+**Status**: pending
+**Area**: config
+
+### Summary
+Manual training shell pipelines should accept explicit `PYTHON_BIN` and conservative server defaults instead of assuming the caller already activated the right environment and has four visible GPUs.
+
+### Details
+The `run_generate_teacher_data*.sh` and downstream SFT/RL shell wrappers previously hard-coded `python3` and inherited the evaluator default `--tensor-parallel-size 4`. In practice that broke smoke validation when the caller had not activated the intended conda env or only had one or two visible GPUs. Passing `PYTHON_BIN`, `TORCHRUN_BIN`, `TENSOR_PARALLEL_SIZE`, and `GPU_MEMORY_UTILIZATION` through the shell entrypoints makes the same scripts usable both in full runs and in constrained smoke environments.
+
+### Suggested Action
+Keep shell entrypoints parameterized via environment variables and have reproduction tooling export the validated interpreter path explicitly.
+
+### Metadata
+- Source: conversation
+- Related Files: examples/revise/run_generate_teacher_data.sh, examples/revise/run_generate_teacher_data_videoespresso.sh, examples/revise/run_revise_nextqa_sft.sh, examples/revise/run_revise_videoespresso_sft.sh, scripts/repro/paper_suite.py
+- Tags: shell, python-bin, tensor-parallel, smoke, environment
+
+---

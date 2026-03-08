@@ -18,6 +18,7 @@ PROJECT_DIR="$(pwd)"
 CONFIG_PATH="$PROJECT_DIR/examples/revise/config"
 ENGINE=${ENGINE:-sglang}
 N_GPUS=${N_GPUS:-4}
+PYTHON_BIN="${PYTHON_BIN:-python3}"
 
 SFT_CKPT_DIR="${SFT_CKPT_DIR:-$PROJECT_DIR/outputs/revise_nextqa_sft}"
 TEACHER_LOG="${TEACHER_LOG:-$PROJECT_DIR/outputs/nextqa_pnp_7b_train_log.jsonl}"
@@ -67,7 +68,7 @@ echo ""
 echo "================================================================"
 echo "  Stage 2: RL training (GRPO + EAGER reward)"
 echo "================================================================"
-python3 -m verl.trainer.main_ppo \
+"$PYTHON_BIN" -m verl.trainer.main_ppo \
   --config-path "$CONFIG_PATH" \
   --config-name revise_nextqa_grpo_after_sft \
   actor_rollout_ref.model.path="$HF_MODEL_PATH" \

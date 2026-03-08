@@ -34,9 +34,9 @@ except Exception:  # pragma: no cover
 from examples.revise.plug_and_play_nextqa_vllm import (  # noqa: E402
     _chat_once,
     _load_nextqa_samples,
-    _load_video_captions,
     _start_vllm_server,
 )
+from examples.revise.caption_utils import ensure_video_captions  # noqa: E402
 from examples.revise.pnp_utils import (  # noqa: E402
     get_model_id as _get_model_id,
     maybe_log_jsonl as _maybe_log_jsonl,
@@ -433,7 +433,16 @@ def _read_completed_sample_ids(log_path: str) -> set[str]:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--model-path", required=True, help="HF model id or local snapshot path")
-    ap.add_argument("--captions-dir", required=True, help="Directory containing <video_id>_cap.json caption files.")
+    ap.add_argument("--captions-dir", default=None, help="Optional directory containing <video_id>_cap.json caption files.")
+    ap.add_argument(
+        "--generated-captions-dir",
+        default=str(REPO_ROOT / "outputs" / "generated_captions" / "nextqa"),
+        help="Directory for auto-generated <video_id>_cap.json files.",
+    )
+    ap.add_argument("--auto-generate-captions", action=argparse.BooleanOptionalAction, default=True)
+    ap.add_argument("--caption-gen-max-frames", type=int, default=16)
+    ap.add_argument("--caption-gen-stride-s", type=int, default=4)
+    ap.add_argument("--caption-gen-timeout-s", type=int, default=600)
     ap.add_argument("--video-root", required=True)
     ap.add_argument("--map-json", required=True)
     ap.add_argument("--csv", required=True, help="NExT-QA CSV (e.g., val.csv)")
@@ -478,8 +487,10 @@ def main() -> int:
     ap.add_argument("--wandb-mode", default=None, choices=[None, "online", "offline"])
 
     args = ap.parse_args()
-    if not os.path.isdir(args.captions_dir):
+    if args.captions_dir and not os.path.isdir(args.captions_dir):
         raise ValueError(f"--captions-dir does not exist or is not a directory: {args.captions_dir}")
+    if args.auto_generate_captions and args.generated_captions_dir:
+        os.makedirs(args.generated_captions_dir, exist_ok=True)
     if args.base_url and args.start_server:
         raise ValueError("--base-url cannot be combined with --start-server.")
 
@@ -545,6 +556,8 @@ def main() -> int:
                     "task": "nextqa_videoagent_officialstyle_caption_vllm",
                     "csv": args.csv,
                     "captions_dir": args.captions_dir,
+                    "generated_captions_dir": args.generated_captions_dir,
+                    "auto_generate_captions": bool(args.auto_generate_captions),
                     "model_path": args.model_path,
                     "num_shards": num_shards,
                     "shard_idx": shard_idx,
@@ -552,6 +565,9 @@ def main() -> int:
                     "max_rounds": args.max_rounds,
                     "max_frames_per_round": args.max_frames_per_round,
                     "caption_max_chars": args.caption_max_chars,
+                    "caption_gen_max_frames": args.caption_gen_max_frames,
+                    "caption_gen_stride_s": args.caption_gen_stride_s,
+                    "caption_gen_timeout_s": args.caption_gen_timeout_s,
                     "temperature": args.temperature,
                     "top_p": args.top_p,
                     "max_tokens": args.max_tokens,
@@ -569,6 +585,7 @@ def main() -> int:
         total_rounds = 0
         total_frames_used = 0
         total_model_calls = 0
+        generated_caption_samples = 0
         start_eval = time.time()
 
         for sample in samples:
@@ -578,7 +595,26 @@ def main() -> int:
             gt_letter = chr(ord("A") + int(sample.answer_idx))
 
             try:
-                caps = _load_video_captions(args.captions_dir, sample.video_id)
+                generated_path = (
+                    os.path.join(args.generated_captions_dir, f"{sample.video_id}_cap.json")
+                    if args.generated_captions_dir
+                    else None
+                )
+                had_generated_before = bool(generated_path and os.path.exists(generated_path))
+                caps = ensure_video_captions(
+                    captions_dir=args.captions_dir,
+                    generated_captions_dir=args.generated_captions_dir,
+                    video_id=sample.video_id,
+                    video_path=sample.video_path,
+                    base_url=base_url,
+                    model_id=model_id,
+                    auto_generate=bool(args.auto_generate_captions),
+                    max_frames=int(args.caption_gen_max_frames),
+                    stride_s=int(args.caption_gen_stride_s),
+                    timeout_s=int(args.caption_gen_timeout_s),
+                )
+                if generated_path and os.path.exists(generated_path) and not had_generated_before:
+                    generated_caption_samples += 1
                 caption_keys, caption_texts = _as_caption_list(caps)
                 if not caption_keys:
                     raise RuntimeError("No captions found")
@@ -811,6 +847,7 @@ def main() -> int:
             "total_frames_used": total_frames_used,
             "avg_frames_used": total_frames_used / samples_n,
             "total_model_calls": total_model_calls,
+            "generated_caption_samples": generated_caption_samples,
             "elapsed_s": elapsed_s,
         }
 
@@ -820,6 +857,12 @@ def main() -> int:
                 json.dump(
                     {
                         "results": results,
+                        "captions_dir": args.captions_dir,
+                        "generated_captions_dir": args.generated_captions_dir,
+                        "auto_generate_captions": bool(args.auto_generate_captions),
+                        "caption_gen_max_frames": args.caption_gen_max_frames,
+                        "caption_gen_stride_s": args.caption_gen_stride_s,
+                        "caption_gen_timeout_s": args.caption_gen_timeout_s,
                         "prompt_log_jsonl": args.log_jsonl,
                         "wandb": {
                             "enabled": bool(args.use_wandb),
@@ -847,6 +890,7 @@ def main() -> int:
             run.summary["invalid_outputs"] = invalid_outputs
             run.summary["elapsed_s"] = elapsed_s
             run.summary["total_model_calls"] = total_model_calls
+            run.summary["generated_caption_samples"] = generated_caption_samples
             run.finish()
 
         return 0

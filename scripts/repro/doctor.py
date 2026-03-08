@@ -58,16 +58,18 @@ def build_report() -> dict:
     videoespresso = assets["datasets"]["videoespresso"]
     if not videoespresso.get("test_json") or not videoespresso.get("test_video_root"):
         blockers.append("VideoEspresso test set not found.")
-    public_train_probe = videoespresso["public_train_probe"]
-    mc_train_probe = videoespresso["mc_train_probe"]
-    if not mc_train_probe.get("multiple_choice"):
-        blockers.append(
-            "VideoEspresso RL train split is blocked: no multiple-choice train JSON with options/correct_answer found."
+    if not videoespresso.get("train_video_json"):
+        blockers.append("VideoEspresso open-ended train JSON not found.")
+    elif not videoespresso["mc_train_probe"].get("multiple_choice"):
+        warnings.append(
+            "VideoEspresso MC train JSON not found; reproduction will synthesize one from the open-ended public train file."
         )
 
     egoschema = assets["datasets"]["egoschema"]
-    if not egoschema.get("video_root") or not egoschema.get("json"):
-        blockers.append("EgoSchema local JSON/video root not found.")
+    if not packages.get("datasets"):
+        blockers.append("EgoSchema HF fallback requires the datasets package.")
+    elif not egoschema.get("video_root") or not egoschema.get("json"):
+        warnings.append("EgoSchema local JSON/video root not found; runs will fall back to Hugging Face and download videos on demand.")
 
     return {
         "assets": assets,

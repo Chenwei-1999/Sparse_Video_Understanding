@@ -127,6 +127,7 @@ def discover_assets() -> dict[str, Any]:
     ve_mc_train_json = _env_or_existing(
         "REVISE_VIDEOESPRESSO_MC_TRAIN_JSON",
         [
+            REPO_ROOT / "outputs" / "videoespresso_train_mc.json",
             Path(ve_root) / "train_video" / "videoespresso_train_mc.json",
             Path(ve_root) / "train_video" / "videoespresso_train_multiple_choice.json",
         ]

@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""Generate SFT training data from 7B plug-and-play evaluation logs.
+"""Generate SFT training data from REVISE multi-round evaluation logs.
 
 Reads REVISE multi-round eval logs (JSONL), reconstructs multi-turn
 conversations, filters for quality, and outputs parquet files compatible
 with MultiTurnSFTDataset.
 
 IMPORTANT: The input log must come from the TRAIN split to avoid data
-leakage. Use run_generate_teacher_data.sh to generate train-split logs.
+leakage. Use the dataset-specific `run_generate_teacher_data*.sh` helper
+to generate train-split logs.
 
 Usage:
     # Step 1: Generate teacher data on train split (requires GPU)
@@ -110,7 +111,7 @@ def main():
         "--val-csv",
         type=str,
         default="/shares/hlw3876/chenwei/NExT-QA/nextqa/val.csv",
-        help="NExT-QA val CSV to check for data leakage",
+        help="Optional validation CSV to check for data leakage. Pass '' to disable.",
     )
     parser.add_argument(
         "--output",
@@ -134,7 +135,7 @@ def main():
     print(f"  Unique samples: {len(sample_rounds)}")
 
     # 1b. Check for data leakage against val split
-    if os.path.exists(args.val_csv):
+    if args.val_csv and os.path.exists(args.val_csv):
         val_keys = set()
         with open(args.val_csv) as f:
             reader = csv.DictReader(f)
@@ -143,8 +144,14 @@ def main():
         eval_keys = set()
         for entries in sample_rounds.values():
             e = entries[0]
-            eval_keys.add((e["video_id"], e["question"]))
+            video_id = e.get("video_id")
+            question = e.get("question")
+            if video_id and question:
+                eval_keys.add((video_id, question))
         overlap = eval_keys & val_keys
+        if not eval_keys:
+            print("  (Skipping leakage overlap stats: log entries do not expose video_id/question keys)")
+            overlap = set()
         if overlap:
             pct = len(overlap) / len(eval_keys) * 100
             print(f"\n  WARNING: {len(overlap)}/{len(eval_keys)} samples ({pct:.0f}%) overlap with val split!")
@@ -161,9 +168,9 @@ def main():
     conversations = []
     skipped = 0
     for sample_id, entries in sample_rounds.items():
-        # Sort by round_idx, then retry_idx (take retry_idx=0 only)
+        # Sort by round_idx/round, then retry_idx (take retry_idx=0 only)
         entries = [e for e in entries if e.get("retry_idx", 0) == 0]
-        entries.sort(key=lambda e: e["round_idx"])
+        entries.sort(key=lambda e: int(e.get("round_idx", e.get("round", 0))))
         conv = build_conversation(entries)
         if conv is not None:
             conversations.append(conv)

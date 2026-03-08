@@ -34,14 +34,12 @@ from examples.revise.pnp_utils import (
     wait_port,
     wait_for_server,
 )
+from examples.revise.caption_utils import ensure_video_captions
 
 try:
     import wandb  # type: ignore
 except Exception:  # pragma: no cover
     wandb = None
-
-
-_CAPTION_CACHE: dict[str, dict[int, str]] = {}
 
 
 SYSTEM_PROMPT = (
@@ -126,33 +124,6 @@ def _clip_middle(text: str, max_chars: int) -> str:
     head = keep // 2
     tail = keep - head
     return text[:head].rstrip() + "\n...\n" + text[-tail:].lstrip()
-
-
-def _load_video_captions(captions_dir: str, video_id: str) -> dict[int, str]:
-    cached = _CAPTION_CACHE.get(video_id)
-    if cached is not None:
-        return cached
-    path = os.path.join(captions_dir, f"{video_id}_cap.json")
-    if not os.path.exists(path):
-        _CAPTION_CACHE[video_id] = {}
-        return {}
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            raw = json.load(f)
-    except Exception:
-        _CAPTION_CACHE[video_id] = {}
-        return {}
-    captions: dict[int, str] = {}
-    if isinstance(raw, dict):
-        for k, v in raw.items():
-            try:
-                idx = int(k)
-            except Exception:
-                continue
-            if isinstance(v, str):
-                captions[idx] = v.strip()
-    _CAPTION_CACHE[video_id] = captions
-    return captions
 
 
 def _format_caption_timeline(
@@ -274,7 +245,16 @@ def _start_vllm_server(args: argparse.Namespace) -> subprocess.Popen[str]:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--model-path", required=True, help="HF model id or local snapshot path")
-    ap.add_argument("--captions-dir", required=True, help="Directory containing <video_id>_cap.json caption files.")
+    ap.add_argument("--captions-dir", default=None, help="Optional directory containing <video_id>_cap.json caption files.")
+    ap.add_argument(
+        "--generated-captions-dir",
+        default=str(REPO_ROOT / "outputs" / "generated_captions" / "nextqa"),
+        help="Directory for auto-generated <video_id>_cap.json files.",
+    )
+    ap.add_argument("--auto-generate-captions", action=argparse.BooleanOptionalAction, default=True)
+    ap.add_argument("--caption-gen-max-frames", type=int, default=16)
+    ap.add_argument("--caption-gen-stride-s", type=int, default=4)
+    ap.add_argument("--caption-gen-timeout-s", type=int, default=600)
     ap.add_argument("--video-root", required=True)
     ap.add_argument("--map-json", required=True)
     ap.add_argument("--csv", required=True, help="NExT-QA CSV (e.g., val.csv)")
@@ -316,8 +296,10 @@ def main() -> int:
     ap.add_argument("--wandb-mode", default=None, choices=[None, "online", "offline"])
 
     args = ap.parse_args()
-    if not os.path.isdir(args.captions_dir):
+    if args.captions_dir and not os.path.isdir(args.captions_dir):
         raise ValueError(f"--captions-dir does not exist or is not a directory: {args.captions_dir}")
+    if args.auto_generate_captions and args.generated_captions_dir:
+        os.makedirs(args.generated_captions_dir, exist_ok=True)
     if args.base_url and args.start_server:
         raise ValueError("--base-url cannot be combined with --start-server.")
 
@@ -378,6 +360,8 @@ def main() -> int:
                     "task": "nextqa_caption_only_vllm",
                     "csv": args.csv,
                     "captions_dir": args.captions_dir,
+                    "generated_captions_dir": args.generated_captions_dir,
+                    "auto_generate_captions": bool(args.auto_generate_captions),
                     "model_path": args.model_path,
                     "num_shards": num_shards,
                     "shard_idx": shard_idx,
@@ -387,6 +371,9 @@ def main() -> int:
                     "max_tokens": args.max_tokens,
                     "per_caption_max_chars": args.per_caption_max_chars,
                     "caption_max_total_chars": args.caption_max_total_chars,
+                    "caption_gen_max_frames": args.caption_gen_max_frames,
+                    "caption_gen_stride_s": args.caption_gen_stride_s,
+                    "caption_gen_timeout_s": args.caption_gen_timeout_s,
                 },
             )
 
@@ -396,12 +383,32 @@ def main() -> int:
         failed = 0
         total_model_calls = 0
         total_caption_chars = 0
+        generated_caption_samples = 0
 
         start_eval = time.time()
         for s in samples:
             processed += 1
             try:
-                captions = _load_video_captions(args.captions_dir, s.video_id)
+                generated_path = (
+                    os.path.join(args.generated_captions_dir, f"{s.video_id}_cap.json")
+                    if args.generated_captions_dir
+                    else None
+                )
+                had_generated_before = bool(generated_path and os.path.exists(generated_path))
+                captions = ensure_video_captions(
+                    captions_dir=args.captions_dir,
+                    generated_captions_dir=args.generated_captions_dir,
+                    video_id=s.video_id,
+                    video_path=s.video_path,
+                    base_url=base_url,
+                    model_id=model_id,
+                    auto_generate=bool(args.auto_generate_captions),
+                    max_frames=int(args.caption_gen_max_frames),
+                    stride_s=int(args.caption_gen_stride_s),
+                    timeout_s=int(args.caption_gen_timeout_s),
+                )
+                if generated_path and os.path.exists(generated_path) and not had_generated_before:
+                    generated_caption_samples += 1
                 caption_block, caption_chars = _format_caption_timeline(
                     captions,
                     per_caption_max_chars=args.per_caption_max_chars,
@@ -482,6 +489,7 @@ def main() -> int:
             run.summary["avg_caption_chars"] = avg_caption_chars
             run.summary["invalid_outputs"] = invalid_outputs
             run.summary["failed"] = failed
+            run.summary["generated_caption_samples"] = generated_caption_samples
             run.finish()
 
         results = {
@@ -500,6 +508,7 @@ def main() -> int:
             "total_model_calls": total_model_calls,
             "fallback_frames_used": 0,
             "avg_caption_chars": avg_caption_chars,
+            "generated_caption_samples": generated_caption_samples,
         }
 
         prompt_log_lines = 0
@@ -519,6 +528,8 @@ def main() -> int:
                         "video_root": args.video_root,
                         "map_json": args.map_json,
                         "captions_dir": args.captions_dir,
+                        "generated_captions_dir": args.generated_captions_dir,
+                        "auto_generate_captions": bool(args.auto_generate_captions),
                         "model_path": args.model_path,
                         "engine": "vllm",
                         "tensor_parallel_size": args.tensor_parallel_size,
@@ -530,6 +541,9 @@ def main() -> int:
                         "shard_idx": shard_idx,
                         "per_caption_max_chars": args.per_caption_max_chars,
                         "caption_max_total_chars": args.caption_max_total_chars,
+                        "caption_gen_max_frames": args.caption_gen_max_frames,
+                        "caption_gen_stride_s": args.caption_gen_stride_s,
+                        "caption_gen_timeout_s": args.caption_gen_timeout_s,
                         "temperature": args.temperature,
                         "top_p": args.top_p,
                         "max_tokens": args.max_tokens,

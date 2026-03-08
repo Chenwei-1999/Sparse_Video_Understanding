@@ -94,6 +94,12 @@ python scripts/repro/paper_suite.py list
 
 See [paper/REPRODUCE.md](paper/REPRODUCE.md) for the full experiment matrix, environment variables, and known blockers.
 
+Current reproduction behavior:
+
+- NExT-QA caption baselines auto-generate missing caption caches when `REVISE_NEXTQA_CAPTIONS_DIR` is unset.
+- EgoSchema falls back to Hugging Face subset metadata and downloads required videos on demand if no local EgoSchema assets are configured.
+- VideoEspresso RL reproduction can synthesize a local MC train JSON from the public open-ended train file via `scripts/repro/prepare_videoespresso_mc_train.py`.
+
 ### Plug-and-play evaluation (NExT-QA)
 
 ```bash

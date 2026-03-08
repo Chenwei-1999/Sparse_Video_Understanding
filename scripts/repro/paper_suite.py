@@ -77,10 +77,7 @@ def _require_nextqa(assets: dict) -> list[str]:
 
 
 def _require_nextqa_captions(assets: dict) -> list[str]:
-    missing = _require_nextqa(assets)
-    if not assets["datasets"]["nextqa"].get("captions_dir"):
-        missing.append("NExT-QA captions_dir missing (set REVISE_NEXTQA_CAPTIONS_DIR).")
-    return missing
+    return _require_nextqa(assets)
 
 
 def _require_videoespresso(assets: dict) -> list[str]:
@@ -93,12 +90,10 @@ def _require_videoespresso(assets: dict) -> list[str]:
 
 
 def _require_egoschema(assets: dict) -> list[str]:
-    eg = assets["datasets"]["egoschema"]
-    missing = []
-    for key in ("video_root", "json"):
-        if not eg.get(key):
-            missing.append(f"EgoSchema {key} missing")
-    return missing + _require_model_or_api(assets)
+    missing = _require_model_or_api(assets)
+    if not assets["packages"].get("datasets"):
+        missing.append("datasets package missing for EgoSchema HF fallback.")
+    return missing
 
 
 def _require_nextqa_training(assets: dict) -> list[str]:
@@ -114,13 +109,14 @@ def _require_nextqa_training(assets: dict) -> list[str]:
 
 def _require_videoespresso_training(assets: dict) -> list[str]:
     missing = _require_videoespresso(assets)
-    probe = assets["datasets"]["videoespresso"]["mc_train_probe"]
-    if not probe.get("multiple_choice"):
-        missing.append(
-            "VideoEspresso MC training JSON missing. Public train files on disk are open-ended and cannot drive current RL code."
-        )
+    if not assets["datasets"]["videoespresso"].get("train_video_json"):
+        missing.append("VideoEspresso open-ended train JSON missing.")
     if not assets["models"].get("qwen25_vl_3b"):
         missing.append("Local Qwen2.5-VL-3B checkpoint required for training.")
+    if not assets["models"].get("qwen25_vl_7b") and not (
+        assets["remote_api"].get("base_url") and assets["remote_api"].get("model_id")
+    ):
+        missing.append("Teacher generation needs local Qwen2.5-VL-7B or a remote API.")
     return missing
 
 
@@ -189,15 +185,17 @@ def _cmd_nextqa_caption(assets: dict, smoke: bool, out_dir: Path) -> list[str]:
         nextqa["map_json"],
         "--csv",
         nextqa["val_csv"],
-        "--captions-dir",
-        nextqa["captions_dir"],
         "--max-samples",
         "1" if smoke else "0",
         "--summary-json",
         str(out_dir / "nextqa_caption.summary.json"),
         "--log-jsonl",
         str(out_dir / "nextqa_caption.jsonl"),
+        "--generated-captions-dir",
+        str(out_dir / "generated_captions" / "nextqa"),
     ]
+    if nextqa.get("captions_dir"):
+        cmd += ["--captions-dir", nextqa["captions_dir"]]
     cmd += _model_endpoint_args(assets, prefer_7b=False, port=19000)
     return cmd
 
@@ -219,15 +217,17 @@ def _cmd_nextqa_videoagent(assets: dict, smoke: bool, out_dir: Path, *, official
         nextqa["map_json"],
         "--csv",
         nextqa["val_csv"],
-        "--captions-dir",
-        nextqa["captions_dir"],
         "--max-samples",
         "1" if smoke else "0",
         "--summary-json",
         str(out_dir / f"{prefix}.summary.json"),
         "--log-jsonl",
         str(out_dir / f"{prefix}.jsonl"),
+        "--generated-captions-dir",
+        str(out_dir / "generated_captions" / "nextqa"),
     ]
+    if nextqa.get("captions_dir"):
+        cmd += ["--captions-dir", nextqa["captions_dir"]]
     cmd += _model_endpoint_args(assets, prefer_7b=False, port=18200 if not official else 18201)
     return cmd
 
@@ -286,15 +286,12 @@ def _cmd_videoespresso_oneshot(assets: dict, smoke: bool, out_dir: Path) -> list
 
 def _cmd_egoschema_pnp(assets: dict, smoke: bool, out_dir: Path) -> list[str]:
     eg = assets["datasets"]["egoschema"]
+    cache_dir = str(REPO_ROOT / "outputs" / "egoschema_hf" / "videos")
     cmd = [
         _python_bin(),
         str(REPO_ROOT / "examples/revise/plug_and_play_egoschema_vllm.py"),
         "--dataset-name",
         "egoschema",
-        "--json",
-        eg["json"],
-        "--video-root",
-        eg["video_root"],
         "--max-rounds",
         "2" if smoke else "4",
         "--max-frames-per-round",
@@ -306,6 +303,25 @@ def _cmd_egoschema_pnp(assets: dict, smoke: bool, out_dir: Path) -> list[str]:
         "--log-jsonl",
         str(out_dir / "egoschema_pnp.jsonl"),
     ]
+    if eg.get("json") and eg.get("video_root"):
+        cmd += [
+            "--egoschema-source",
+            "local",
+            "--json",
+            eg["json"],
+            "--video-root",
+            eg["video_root"],
+        ]
+    else:
+        cmd += [
+            "--egoschema-source",
+            "hf",
+            "--egoschema-hf-config",
+            "Subset",
+            "--egoschema-video-cache-dir",
+            cache_dir,
+            "--auto-download-egoschema-videos",
+        ]
     cmd += _model_endpoint_args(assets, prefer_7b=not smoke, port=18110)
     return cmd
 
@@ -422,8 +438,12 @@ def _cmd_nextqa_hydra_resolve(assets: dict, smoke: bool, out_dir: Path) -> list[
 
 def _manual_nextqa_pipeline(assets: dict, smoke: bool, out_dir: Path) -> str:
     nextqa = assets["datasets"]["nextqa"]
+    python_bin = _python_bin()
     return (
         f"cd {shlex.quote(str(REPO_ROOT))} && "
+        "PYTHON_BIN="
+        + shlex.quote(str(python_bin))
+        + " "
         "VIDEO_ROOT="
         + shlex.quote(str(nextqa["video_root"]))
         + " "
@@ -450,9 +470,35 @@ def _manual_nextqa_pipeline(assets: dict, smoke: bool, out_dir: Path) -> str:
 
 
 def _manual_videoespresso_pipeline(assets: dict, smoke: bool, out_dir: Path) -> str:
+    ve = assets["datasets"]["videoespresso"]
+    mc_json = ve.get("mc_train_json") or str(REPO_ROOT / "outputs" / "videoespresso_train_mc.json")
+    python_bin = _python_bin()
     return (
-        "Requires a private or pre-converted VideoEspresso multiple-choice train JSON. "
-        "Set REVISE_VIDEOESPRESSO_MC_TRAIN_JSON and then run a dedicated SFT/RL config."
+        f"cd {shlex.quote(str(REPO_ROOT))} && "
+        "PYTHON_BIN="
+        + shlex.quote(str(python_bin))
+        + " "
+        "$PYTHON_BIN "
+        + shlex.quote(str(REPO_ROOT / "scripts/repro/prepare_videoespresso_mc_train.py"))
+        + " "
+        f"--input {shlex.quote(str(ve['train_video_json']))} "
+        f"--output {shlex.quote(str(mc_json))} && "
+        "VIDEO_ROOT="
+        + shlex.quote(str(ve["root"]))
+        + " "
+        "JSON="
+        + shlex.quote(str(mc_json))
+        + " "
+        "./examples/revise/run_generate_teacher_data_videoespresso.sh && "
+        "./examples/revise/run_revise_videoespresso_sft_then_rl.sh "
+        "data.local_mc.video_root="
+        + shlex.quote(str(ve["root"]))
+        + " "
+        "data.train_files="
+        + shlex.quote(str(mc_json))
+        + " "
+        "data.val_files="
+        + shlex.quote(str(ve["test_json"]))
     )
 
 
