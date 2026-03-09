@@ -553,3 +553,66 @@ Set `hydra.run.dir` in the dedicated smoke config to an env-overridable path und
 ### Metadata
 - Reproducible: yes
 - Related Files: examples/revise/config/revise_videoespresso_grpo_smoke.yaml
+## [ERR-20260308-010] videoespresso_longrun_stdout_stops_at_step4
+
+**Logged**: 2026-03-08T17:07:00-05:00
+**Priority**: medium
+**Status**: pending
+**Area**: infra
+
+### Summary
+A clean-env `20-step` VideoEspresso GRPO long run reported progress only through `step 4`, while one shell-wrapped attempt still returned exit code `0` without later-step evidence or checkpoint files.
+
+### Error
+```text
+Observed mismatch:
+- direct PTY run reached Training Progress 20% (4/20), then the session disappeared
+- shell-wrapped rerun wrote exit_code.txt=0, but train.stdout only records step:1..4
+- no checkpoint directory or later-step logs were created
+```
+
+### Context
+- Environment: `/shares/hlw3876/chenwei/miniconda3/envs/vr-paper-vllm-clean`
+- Config: `examples/revise/config/revise_videoespresso_grpo_smoke.yaml`
+- Overrides included `trainer.total_training_steps=20` and checkpoint saving under `/tmp/revise_videoespresso_grpo_longrun_v3` / `v4`
+- Prior `1-step` and `4-step` runs had already succeeded in the same clean env
+
+### Suggested Fix
+Inspect Ray worker logs and training child-process teardown paths to determine whether workers are being killed silently after `step 4`, then rerun with explicit unbuffered logging and verified checkpoint save settings.
+
+### Metadata
+- Reproducible: yes
+- Related Files: examples/revise/config/revise_videoespresso_grpo_smoke.yaml, verl/trainer/main_ppo.py
+- See Also: ERR-20260308-007, ERR-20260308-008, ERR-20260308-009
+
+---
+## [ERR-20260308-011] hydra_relative_config_path_breaks_detached_main_ppo
+
+**Logged**: 2026-03-08T17:09:11-05:00
+**Priority**: low
+**Status**: fixed
+**Area**: config
+
+### Summary
+When `verl.trainer.main_ppo` is launched as a module from a detached helper script, a relative `--config-path examples/revise/config` is resolved relative to the module package, not the repository root.
+
+### Error
+```text
+hydra.errors.MissingConfigException: Primary config directory not found.
+Check that the config directory '/home/cxk2993/VideoReasoning/verl/trainer/examples/revise/config' exists and readable
+```
+
+### Context
+- Reproduced in a detached long-run launcher under `/tmp/revise_videoespresso_grpo_longrun_v5/launch.sh`.
+- The helper script had already `cd`'d into the repo root, but Hydra still resolved the relative config path under `verl/trainer/` because the entrypoint was invoked with `python -m verl.trainer.main_ppo`.
+- Earlier interactive runs hid this because they used different invocation context.
+
+### Suggested Fix
+Use an absolute `--config-path /home/cxk2993/VideoReasoning/examples/revise/config` for detached or scripted `main_ppo` launches.
+
+### Metadata
+- Reproducible: yes
+- Related Files: verl/trainer/main_ppo.py
+- See Also: ERR-20260308-010
+
+---

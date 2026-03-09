@@ -154,3 +154,26 @@ Keep shell entrypoints parameterized via environment variables and have reproduc
 - Tags: shell, python-bin, tensor-parallel, smoke, environment
 
 ---
+## [LRN-20260308-008] best_practice
+
+**Logged**: 2026-03-08T17:17:06-05:00
+**Priority**: high
+**Status**: pending
+**Area**: config
+
+### Summary
+In `verl.trainer.ppo.ray_trainer`, `trainer.total_training_steps` does not extend training past dataloader exhaustion; the loop still stops when `trainer.total_epochs * len(train_dataloader)` is exhausted.
+
+### Details
+A VideoEspresso smoke dataset with 4 training examples consistently stopped after 4 steps even when `trainer.total_training_steps=20` was overridden. The trainer uses `total_training_steps` for scheduler/progress bookkeeping and `is_last_step`, but the outer loop is still `for epoch in range(total_epochs)` over the finite dataloader. To actually execute 20 PPO updates on a 4-sample smoke dataset, `trainer.total_epochs` must be at least 5.
+
+### Suggested Action
+When running long smoke jobs on tiny datasets, set both `trainer.total_training_steps` and `trainer.total_epochs` consistently so `total_epochs * len(train_dataloader) >= total_training_steps`.
+
+### Metadata
+- Source: conversation
+- Related Files: verl/trainer/ppo/ray_trainer.py, examples/revise/config/revise_videoespresso_grpo_smoke.yaml
+- Tags: trainer, epochs, dataloader, smoke, grpo
+- See Also: ERR-20260308-010
+
+---
