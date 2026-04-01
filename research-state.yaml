@@ -1,0 +1,127 @@
+project:
+  name: VideoReasoning
+  repo_root: /home/cxk2993/VideoReasoning
+  initialized_on: 2026-04-01
+  mode: autoresearch
+  continuity:
+    requested_by_skill: true
+    available_in_this_environment: false
+    fallback: persist progress in research-state.yaml, findings.md, research-log.md, and to_human/
+
+research_question:
+  primary: >
+    Can we detect errors in multi-round video reasoning chains without human-labeled process data,
+    and can those detections be used to improve downstream VideoQA accuracy?
+  scope:
+    - Focus on REVISE-style multi-round summaries and answer decisions.
+    - Prefer annotation-free or synthetic supervision over human process labels.
+    - Use local/Hugging Face open models only; no OpenAI/Gemini for experiments.
+  success_criteria:
+    - Increase process-error detection quality over simple heuristics or no-critic baselines.
+    - Show that acting on detected errors improves VideoQA accuracy versus the same base reasoner without intervention.
+
+environment:
+  date: 2026-04-01
+  timezone: America/Chicago
+  gpus:
+    count: 3
+    type: NVIDIA A100-SXM4-80GB
+    memory_gb_each: 80
+  datasets:
+    nextqa:
+      video_root: /shares/hlw3876/chenwei/NExT-QA/NExTVideo
+      csv_train: /shares/hlw3876/chenwei/NExT-QA/nextqa/train.csv
+      csv_val: /shares/hlw3876/chenwei/NExT-QA/nextqa/val.csv
+      map_json: /shares/hlw3876/chenwei/NExT-QA/map_vid_vidorID.json
+    video_critic:
+      root: /shares/hlw3876/chenwei/VideoCritic_outputs
+      synthetic_train: /shares/hlw3876/chenwei/VideoCritic_outputs/training_data/train.jsonl
+      synthetic_summary: /shares/hlw3876/chenwei/VideoCritic_outputs/training_data/summary.json
+  checkpoints:
+    revise_sft:
+      path: /home/cxk2993/VideoReasoning/outputs/revise_nextqa_sft/global_step_844/huggingface
+    qwen25_vl_3b:
+      path: /shares/hlw3876/chenwei/hf_cache/models--Qwen--Qwen2.5-VL-3B-Instruct/snapshots/66285546d2b821cf421d4f5eb2576359d3770cd3
+
+existing_evidence:
+  revise_logs:
+    base_qwen25vl3b:
+      source: /home/cxk2993/VideoReasoning/debug_prompt_logs/full_nextqa_val_20260305_120329_summary.json
+      accuracy: 0.4083
+      invalid_outputs: 10106
+      invalid_action_terminated: 1078
+      avg_rounds: 2.7784
+    revise_sft:
+      source: /home/cxk2993/VideoReasoning/debug_prompt_logs/sft_nextqa_val_20260305_190153_summary.json
+      accuracy: 0.5651
+      invalid_outputs: 20
+      invalid_action_terminated: 0
+      avg_rounds: 3.6687
+  video_critic:
+    synthetic_train_items: 12600
+    notable_results:
+      - Process correction quality is currently weak when revision is triggered too broadly.
+      - Typed/guided correction slightly helps some settings, but naive selective revision can hurt badly.
+      - Structured error protocols improve taxonomy alignment but still have very high false-positive rates on clean chains.
+
+hypotheses:
+  H1:
+    name: Risk-calibrated process critic from synthetic chains transfers to REVISE traces
+    motivation: >
+      The local VideoCritic data already contains large-scale synthetic process errors.
+      A critic trained on chain text plus light metadata may learn general risk signals that correlate
+      with downstream QA failure in REVISE traces even without human process labels.
+    prediction: >
+      Critic score will separate correct vs incorrect REVISE final answers and identify high-risk rounds
+      better than format-only heuristics.
+    status: active
+  H2:
+    name: Selective intervention beats always-revise
+    motivation: >
+      Existing revision experiments show that broad revision often breaks correct answers.
+      If a critic can gate only high-risk chains, intervention should yield a positive net gain.
+    prediction: >
+      Critic-gated revise/re-answer will improve NExT-QA accuracy over vanilla REVISE and over unconditional revise.
+    status: pending
+  H3:
+    name: Round-level inconsistency signals are enough for an annotation-free baseline
+    motivation: >
+      REVISE exposes POHR summaries, requested frames, and answer transitions. Internal inconsistency,
+      unsupported jumps, and uncertainty/answer mismatch may provide a cheap baseline without any learned critic.
+    prediction: >
+      Simple process features will already correlate with error, but a learned critic will outperform them.
+    status: active
+
+evaluation:
+  detection:
+    primary_metrics:
+      - AUROC for predicting final QA correctness from process trace
+      - AUPRC on incorrect-answer detection
+      - F1 / recall@fixed-budget for selecting risky chains
+    baselines:
+      - no detector
+      - format-invalid heuristic
+      - process-feature logistic baseline
+  intervention:
+    primary_metrics:
+      - final NExT-QA accuracy
+      - delta accuracy on high-risk subset
+      - break rate on originally correct answers
+      - fix rate on originally incorrect answers
+    baselines:
+      - vanilla REVISE
+      - always revise / reread
+      - heuristic-gated revise
+
+current_direction:
+  phase: bootstrap_to_first_inner_loop
+  highest_priority_experiment: H1 process-risk calibration on existing logs
+  rationale: >
+    This is the fastest path to determine whether the repo can support a solid process-error story
+    without expensive end-to-end retraining.
+
+next_actions:
+  - Create persistent research notes and first experiment protocol.
+  - Survey literature focused on process verification, multimodal self-correction, and video reasoning failures.
+  - Extract round-level traces from REVISE logs and align them with QA correctness labels.
+  - Build a lightweight critic baseline using VideoCritic synthetic data plus simple heuristics.
