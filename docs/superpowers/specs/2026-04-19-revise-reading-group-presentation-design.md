@@ -86,7 +86,7 @@ Present REVISE as a method that combines:
 - structured reasoning traces via POHR
 - both plug-and-play and RL fine-tuning modes
 
-This section should explain the design motivation and operational mechanism clearly, but it should not get lost in low-level implementation details.
+This section should be the single longest technical block in the talk. It should explain the design motivation and operational mechanism clearly, using enough space for the audience to internalize how the loop works, why summary-as-state matters, and how the method differs from nearby approaches, but it should still avoid drowning in low-level implementation details.
 
 ### Part IV: What The Results Mean
 
@@ -107,9 +107,9 @@ Conclude with:
 The main talk should be budgeted as follows:
 
 - `12-14 min` field and problem setup
-- `8-10 min` research landscape and SOTA taxonomy
-- `12-13 min` REVISE method
-- `7-8 min` experiments, results, and takeaways
+- `7-9 min` research landscape and SOTA taxonomy
+- `14-16 min` REVISE method
+- `6-7 min` experiments, results, and takeaways
 - `2-3 min` conclusion and transition into Q&A
 
 This leaves a small timing buffer inside the 45-minute presentation and preserves the full 15-minute Q&A block.
@@ -142,7 +142,7 @@ The recommended deck size is:
 
 ### Section 3: Research Landscape And SOTA
 
-`7-8 slides`
+`6-7 slides`
 
 - field evolution
 - taxonomy slide
@@ -152,19 +152,22 @@ The recommended deck size is:
 
 ### Section 4: REVISE Core Idea
 
-`8-9 slides`
+`10-11 slides`
 
 - overview figure
 - summary-as-state intuition
+- one-slide motivating contrast with one-shot or uniform sampling
 - POHR structure
 - multi-round interaction loop
+- one worked example trajectory / evidence accumulation walkthrough
 - plug-and-play mode
 - RL mode and EAGER reward
+- why the structured state helps coherence and efficiency
 - why the method differs from one-shot selection
 
 ### Section 5: Experiments And Takeaways
 
-`6-7 slides`
+`5-6 slides`
 
 - benchmarks and setup
 - main results
@@ -268,6 +271,13 @@ The REVISE section should prioritize:
 - the multi-round frame request loop
 - the distinction between plug-and-play and RL modes
 - the practical efficiency story
+
+The REVISE section should be the longest continuous segment of the main deck. In particular, it should include one more method-facing slide than originally planned, so the audience has time to absorb:
+
+- the control loop
+- the role of the persistent state
+- how POHR organizes evidence and uncertainty
+- how the two operating modes relate to the same core mechanism
 
 The following should be included but kept concise:
 
