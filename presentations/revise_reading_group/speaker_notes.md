@@ -13,9 +13,9 @@
 - Optional expansion: One useful lens is to compare this with retrieval-augmented language systems. The hard part is not only reasoning over evidence, but choosing the right evidence at the right time.
 
 ## s03_roadmap
-- Main point: The talk will move from problem setup to method landscape, then into why REVISE is a plausible response to the gap.
-- Talk track: First I will define the long-video QA setting and why naive dense processing fails. Then I will position prior work into a few families: caption or memory pipelines, query-aware frame selection, and agentic multi-round methods. That landscape makes it easier to see what is actually new in REVISE before we get into the method details.
-- Optional expansion: I am deliberately spending time on the landscape because the contribution only makes sense if we separate sparse retrieval, state management, and multi-round control.
+- Main point: The roadmap is organized around field setup, the method landscape, and then REVISE itself.
+- Talk track: I want the audience to know where we are going before we dive into details. First I will set up the task, explain why long-video QA is hard, and anchor that with the benchmark choices. Then I will map the landscape by method family and state-of-the-art framing. Only after that context do we move into REVISE itself: the core idea, the results, and the takeaways.
+- Optional expansion: This ordering is intentional for a mixed audience. The method is easier to evaluate once the retrieval and memory design space is visible.
 
 ## Problem Setup
 
@@ -25,9 +25,9 @@
 - Optional expansion: The benchmarks used here stretch that problem in different directions, from medium-length causal reasoning to longer egocentric video and sparse core-frame reasoning.
 
 ## s05_why_hard
-- Main point: The paper identifies two linked failure modes: information overload and missing key evidence.
-- Talk track: Uniform frame sampling feels neutral, but it is actually a poor default for long videos. You spend budget on near-duplicate frames, and that leaves less room for the semantically important moments. The authors call this information overload plus insufficient key-information awareness. The two issues reinforce each other: redundancy crowds out recall of the frames that would actually settle the question.
-- Optional expansion: This is a useful critique because it targets both accuracy and efficiency with one underlying diagnosis.
+- Main point: The difficulty reduces to redundancy, finite reading budget, and question-dependent selectivity.
+- Talk track: Most frames in a long video do not help with a specific question, so dense sampling is immediately wasteful. At the same time, the model cannot inspect everything because visual context is expensive. That means the system has to be selective, and the right frames depend on the question being asked. Those three pressures together are why long-video QA is not solved by just scaling up the input window.
+- Optional expansion: The benchmark mix matters here because each dataset stresses a different version of this same constraint triangle.
 
 ## s06_sparse_evidence
 - Main point: REVISE claims that the real structure of the problem is semantic sparsity.

@@ -35,12 +35,12 @@ const slides = [
   {
     id: "s03_roadmap",
     section: "opening",
-    layout: "agenda",
+    layout: "comparison",
     title: "Roadmap",
-    bullets: [
-      "Set up the task: what makes long-video question answering hard",
-      "Place REVISE in the landscape of caption pipelines, frame selectors, and agentic methods",
-      "Then ask whether its summary-as-state loop is the right abstraction for sparse video reasoning"
+    columns: [
+      { header: "Field Setup", items: ["Task", "Why hard", "Benchmarks"] },
+      { header: "Landscape", items: ["Method families", "SOTA framing"] },
+      { header: "REVISE", items: ["Core idea", "Results", "Takeaways"] }
     ],
     asset: null,
     citations: [],
@@ -63,15 +63,15 @@ const slides = [
   {
     id: "s05_why_hard",
     section: "context",
-    layout: "problem",
-    title: "Why Long Videos Break Naive VLM Inference",
-    bullets: [
-      "Information overload: dense uniform sampling feeds many redundant frames into the model",
-      "Key-information awareness: the few decisive moments may occur at different temporal scales and are easy to miss",
-      "Those two failures interact, because wasted context budget makes it even harder to include the frames that matter"
+    layout: "comparison",
+    title: "Why Long-Video QA Is Hard",
+    columns: [
+      { header: "Redundancy", items: ["Most frames add little evidence"] },
+      { header: "Budget", items: ["Models cannot read everything"] },
+      { header: "Selectivity", items: ["Useful frames depend on the question"] }
     ],
     asset: null,
-    citations: ["REVISE", "VideoTree"],
+    citations: ["NExT-QA", "EgoSchema", "VideoEspresso"],
     notesKey: "s05_why_hard"
   },
   {

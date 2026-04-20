@@ -416,25 +416,28 @@ function renderFigureSlide(slide, slideData) {
   const leftX = MARGIN.left;
   const figureX = leftX + leftW + MARGIN.gutter;
   const figureW = PAGE.width - MARGIN.right - figureX;
+  const hasFigureLabel = Boolean(slideData.figureLabel);
 
-  slide.addText('Why this example matters', {
-    x: leftX,
-    y: PAGE.contentTop - 0.04,
-    w: leftW,
-    h: 0.24,
-    margin: 0,
-    fontFace: FONTS.accent,
-    fontSize: TYPE.eyebrow + 1,
-    color: COLORS.clay,
-    bold: true,
-    charSpacing: 0.8,
-  });
+  if (hasFigureLabel) {
+    slide.addText(slideData.figureLabel, {
+      x: leftX,
+      y: PAGE.contentTop - 0.04,
+      w: leftW,
+      h: 0.24,
+      margin: 0,
+      fontFace: FONTS.accent,
+      fontSize: TYPE.eyebrow + 1,
+      color: COLORS.clay,
+      bold: true,
+      charSpacing: 0.8,
+    });
+  }
 
   addBulletList(slide, slideData.bullets || [], {
     x: leftX,
-    y: PAGE.contentTop + 0.24,
+    y: hasFigureLabel ? PAGE.contentTop + 0.24 : PAGE.contentTop,
     w: leftW,
-    h: 4.35,
+    h: hasFigureLabel ? 4.35 : 4.59,
   });
 
   addAssetPanel(slide, slideData.asset, {
@@ -461,21 +464,25 @@ function renderComparisonSlide(slide, slideData) {
   applyPaperBackground(slide);
   addSlideTitle(slide, slideData.title, slideData.section);
 
+  const hasSummary = Boolean(slideData.bullets?.length);
   const summaryY = PAGE.contentTop - 0.04;
-  const summaryH = 0.9;
-  addBodyCopy(
-    slide,
-    slideData.bullets || [],
-    {
-      x: MARGIN.left,
-      y: summaryY,
-      w: PAGE.width - MARGIN.left - MARGIN.right,
-      h: summaryH,
-    },
-    { fontSize: TYPE.bodyTight },
-  );
+  const summaryH = hasSummary ? 0.9 : 0;
 
-  const contentY = summaryY + summaryH + 0.18;
+  if (hasSummary) {
+    addBodyCopy(
+      slide,
+      slideData.bullets,
+      {
+        x: MARGIN.left,
+        y: summaryY,
+        w: PAGE.width - MARGIN.left - MARGIN.right,
+        h: summaryH,
+      },
+      { fontSize: TYPE.bodyTight },
+    );
+  }
+
+  const contentY = hasSummary ? summaryY + summaryH + 0.18 : PAGE.contentTop;
   const contentH = PAGE.height - contentY - 0.82;
 
   if (slideData.comparisons?.length) {
@@ -491,22 +498,24 @@ function renderComparisonSlide(slide, slideData) {
         y: contentY,
         w: colW,
         h: contentH,
-        kicker: header?.kicker || humanizeKey(key),
+        kicker: header?.kicker || null,
         title: header?.title || humanizeKey(key),
         body: slideData.comparisons.map((item) => String(item[key] ?? '')),
       });
     });
   } else if (slideData.columns?.length) {
-    const cardW = (PAGE.width - MARGIN.left - MARGIN.right - MARGIN.gutter) / 2;
+    const cardCount = slideData.columns.length;
+    const cardW =
+      (PAGE.width - MARGIN.left - MARGIN.right - (cardCount - 1) * MARGIN.gutter) / cardCount;
     slideData.columns.forEach((column, index) => {
       addCard(slide, {
         x: MARGIN.left + index * (cardW + MARGIN.gutter),
         y: contentY,
         w: cardW,
         h: contentH,
-        kicker: column.kicker || slideData.section,
-        title: column.label || humanizeKey(`column ${index + 1}`),
-        body: column.points,
+        kicker: column.kicker || null,
+        title: column.header || column.label || humanizeKey(`column ${index + 1}`),
+        body: column.items || column.points || [],
       });
     });
   }
@@ -518,9 +527,8 @@ function renderTakeawaySlide(slide, slideData) {
   applyPaperBackground(slide);
   addSlideTitle(slide, slideData.title, slideData.section);
 
-  const bodyW = 5.3;
-  const calloutX = MARGIN.left + bodyW + MARGIN.gutter;
-  const calloutW = PAGE.width - MARGIN.right - calloutX;
+  const hasAsset = Boolean(slideData.asset);
+  const bodyW = hasAsset ? 5.3 : PAGE.width - MARGIN.left - MARGIN.right;
 
   addBulletList(slide, slideData.bullets || [], {
     x: MARGIN.left,
@@ -529,37 +537,14 @@ function renderTakeawaySlide(slide, slideData) {
     h: 4.8,
   });
 
-  addCard(slide, {
-    x: calloutX,
-    y: PAGE.contentTop,
-    w: calloutW,
-    h: 2.05,
-    kicker: 'Editorial read',
-    title: slideData.bullets?.[0] || 'Key takeaway',
-    body: slideData.bullets?.slice(1, 3) || [],
-    fill: 'FCFAF5',
-  });
-
   if (slideData.asset) {
+    const calloutX = MARGIN.left + bodyW + MARGIN.gutter;
+    const calloutW = PAGE.width - MARGIN.right - calloutX;
     addAssetPanel(slide, slideData.asset, {
       x: calloutX,
-      y: PAGE.contentTop + 2.28,
+      y: PAGE.contentTop,
       w: calloutW,
-      h: 2.62,
-    });
-  } else {
-    addCard(slide, {
-      x: calloutX,
-      y: PAGE.contentTop + 2.28,
-      w: calloutW,
-      h: 2.62,
-      kicker: 'Speaker cue',
-      title: 'Use this slide to frame the section transition',
-      body: [
-        'Contrast the current limitation with the mechanism REVISE introduces.',
-        'Keep the right rail compact so the left-side bullets remain the primary reading path.',
-      ],
-      fill: 'FCFAF5',
+      h: 4.9,
     });
   }
 
