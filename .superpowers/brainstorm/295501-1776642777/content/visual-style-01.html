@@ -1,0 +1,218 @@
+<style>
+  .deck-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 24px;
+    margin-top: 24px;
+  }
+  .deck-card {
+    border: 1px solid rgba(255,255,255,0.12);
+    border-radius: 20px;
+    overflow: hidden;
+    background: rgba(255,255,255,0.03);
+    cursor: pointer;
+  }
+  .deck-preview {
+    aspect-ratio: 16 / 9;
+    padding: 18px;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+  }
+  .preview-label {
+    font-size: 11px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    opacity: 0.72;
+  }
+  .preview-title {
+    font-size: 28px;
+    line-height: 1.05;
+    font-weight: 700;
+    max-width: 80%;
+  }
+  .preview-subtitle {
+    font-size: 13px;
+    line-height: 1.35;
+    max-width: 72%;
+    opacity: 0.9;
+  }
+  .preview-footer {
+    display: flex;
+    justify-content: space-between;
+    align-items: end;
+    font-size: 11px;
+    opacity: 0.75;
+  }
+  .mini-bars {
+    display: flex;
+    gap: 6px;
+    align-items: end;
+    height: 52px;
+  }
+  .mini-bars span {
+    width: 18px;
+    border-radius: 6px 6px 0 0;
+    display: block;
+  }
+  .mini-flow {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+  }
+  .mini-flow span {
+    padding: 8px 10px;
+    border-radius: 999px;
+    font-size: 11px;
+    border: 1px solid currentColor;
+  }
+  .mini-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 999px;
+    display: inline-block;
+  }
+  .deck-body {
+    padding: 16px 18px 18px;
+  }
+  .deck-body h3 {
+    margin: 0 0 8px;
+    font-size: 18px;
+  }
+  .deck-body p {
+    margin: 0;
+    font-size: 14px;
+    line-height: 1.45;
+    color: rgba(255,255,255,0.78);
+  }
+  .style-a {
+    background: linear-gradient(145deg, #f7f4ed 0%, #ece7dc 100%);
+    color: #1b2633;
+  }
+  .style-a .mini-bars span:nth-child(1) { height: 18px; background: #304c89; }
+  .style-a .mini-bars span:nth-child(2) { height: 40px; background: #db7c26; }
+  .style-a .mini-bars span:nth-child(3) { height: 30px; background: #6f8f72; }
+  .style-a .mini-bars span:nth-child(4) { height: 46px; background: #7d5a50; }
+  .style-b {
+    background:
+      radial-gradient(circle at 75% 22%, rgba(83, 156, 255, 0.35), transparent 28%),
+      radial-gradient(circle at 18% 88%, rgba(0, 255, 191, 0.22), transparent 26%),
+      linear-gradient(145deg, #08111f 0%, #102844 55%, #081520 100%);
+    color: #f5f8ff;
+  }
+  .style-b .mini-bars span:nth-child(1) { height: 22px; background: #4fd1c5; }
+  .style-b .mini-bars span:nth-child(2) { height: 45px; background: #7aa2ff; }
+  .style-b .mini-bars span:nth-child(3) { height: 32px; background: #b794f4; }
+  .style-b .mini-bars span:nth-child(4) { height: 48px; background: #f6ad55; }
+  .style-c {
+    background:
+      linear-gradient(180deg, rgba(255,255,255,0.06), rgba(255,255,255,0.02)),
+      linear-gradient(135deg, #101317 0%, #181d22 100%);
+    color: #f1f4f7;
+    position: relative;
+  }
+  .style-c::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background:
+      linear-gradient(90deg, transparent 0 88%, rgba(255,255,255,0.1) 88% 89%, transparent 89% 100%),
+      linear-gradient(180deg, transparent 0 84%, rgba(255,255,255,0.08) 84% 85%, transparent 85% 100%);
+    pointer-events: none;
+  }
+  .style-c .mini-flow span:nth-child(1) { color: #9ae6b4; }
+  .style-c .mini-flow span:nth-child(2) { color: #f6ad55; }
+  .style-c .mini-flow span:nth-child(3) { color: #90cdf4; }
+  .style-note {
+    margin-top: 20px;
+    font-size: 14px;
+    color: rgba(255,255,255,0.72);
+  }
+  @media (max-width: 1100px) {
+    .deck-grid {
+      grid-template-columns: 1fr;
+    }
+  }
+</style>
+
+<h2>Choose A Visual Direction</h2>
+<p class="subtitle">
+  Same slide structure, three different design languages for a 60-minute internal reading-group talk on long-video reasoning.
+</p>
+
+<div class="deck-grid">
+  <div class="deck-card" data-choice="a" onclick="toggleSelect(this)">
+    <div class="deck-preview style-a">
+      <div>
+        <div class="preview-label">Option A</div>
+        <div class="preview-title">Editorial Research</div>
+      </div>
+      <div class="mini-bars">
+        <span></span><span></span><span></span><span></span>
+      </div>
+      <div>
+        <div class="preview-subtitle">Warm paper-like background, restrained color, strong chart readability.</div>
+        <div class="preview-footer">
+          <span>Best for</span>
+          <span>classic seminar</span>
+        </div>
+      </div>
+    </div>
+    <div class="deck-body">
+      <h3>A. Editorial Research</h3>
+      <p>Looks polished and academic without feeling like default PowerPoint. Good if you want the room to focus on diagrams, tables, and comparisons.</p>
+    </div>
+  </div>
+
+  <div class="deck-card" data-choice="b" onclick="toggleSelect(this)">
+    <div class="deck-preview style-b">
+      <div>
+        <div class="preview-label">Option B</div>
+        <div class="preview-title">Cinematic Systems</div>
+      </div>
+      <div class="mini-bars">
+        <span></span><span></span><span></span><span></span>
+      </div>
+      <div>
+        <div class="preview-subtitle">Dark, high-contrast, more dramatic. Makes the talk feel modern and “AI systems”.</div>
+        <div class="preview-footer">
+          <span>Best for</span>
+          <span>big visuals</span>
+        </div>
+      </div>
+    </div>
+    <div class="deck-body">
+      <h3>B. Cinematic Systems</h3>
+      <p>Best if you want the deck to feel bold and contemporary. Strong for architecture slides, benchmark maps, and visual narrative, but slightly riskier for dense tables.</p>
+    </div>
+  </div>
+
+  <div class="deck-card" data-choice="c" onclick="toggleSelect(this)">
+    <div class="deck-preview style-c">
+      <div>
+        <div class="preview-label">Option C</div>
+        <div class="preview-title">Editorial Tech Brief</div>
+      </div>
+      <div class="mini-flow">
+        <span>Setup</span>
+        <span>Landscape</span>
+        <span>REVISE</span>
+      </div>
+      <div>
+        <div class="preview-subtitle">Minimal dark-neutral palette with accent-coded sections and sharper information hierarchy.</div>
+        <div class="preview-footer">
+          <span>Best for</span>
+          <span>reading group</span>
+        </div>
+      </div>
+    </div>
+    <div class="deck-body">
+      <h3>C. Editorial Tech Brief</h3>
+      <p>Balanced option. Feels modern but still controlled, with enough structure for lots of related-work and SOTA framing. This is the safest strong choice for your audience.</p>
+    </div>
+  </div>
+</div>
+
+<p class="style-note">
+  Click one if something clearly stands out. If you want, reply with a hybrid such as “C layout with A colors”.
+</p>
