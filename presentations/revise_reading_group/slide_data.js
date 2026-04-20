@@ -1,10 +1,8 @@
-const path = require("path");
-
 const LOCAL_ASSETS = {
-  overview: path.resolve("assets/overview.png"),
-  summary: path.resolve("assets/summary_as_state.png"),
-  sketch: path.resolve("assets/sketch.png"),
-  pareto: path.resolve("assets/pareto.png")
+  overview: "assets/overview.png",
+  summary: "assets/summary_as_state.png",
+  sketch: "assets/sketch.png",
+  pareto: "assets/pareto.png"
 };
 
 const slides = [
