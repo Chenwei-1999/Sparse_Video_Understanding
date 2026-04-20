@@ -63,7 +63,7 @@ function parseSpeakerNotes(markdown) {
       commitCurrentSection();
 
       const heading = headingMatch[1].trim();
-      currentKey = /^s\d+_[\w-]+$/.test(heading) ? heading : null;
+      currentKey = /^(?:s\d+|a\d+)_[\w-]+$/.test(heading) ? heading : null;
       currentLines = [];
       return;
     }

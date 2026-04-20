@@ -136,48 +136,70 @@
 ## Experiments
 
 ## s26_setup
-- Main point:
-- Talk track:
-- Optional expansion:
+- Main point: Read the experiments as an accuracy-versus-budget argument, not as a raw leaderboard dump.
+- Talk track: Before looking at numbers, I want to set the lens. REVISE is capped at three frames per round and four rounds overall, so the method is operating under a very small visual budget by design. The important metrics are therefore paired: answer accuracy and total frames used. The paper matters if iterative control lets a frozen model buy much better answers without escaping that sparse regime.
+- Optional expansion: The plug-and-play setup is also important because it isolates the controller. If scores improve without retraining the backbone, the interaction pattern itself is doing real work.
 
 ## s27_main_results
-- Main point:
-- Talk track:
-- Optional expansion:
+- Main point: The main result is that iterative control produces large accuracy gains while staying in a single-digit frame regime.
+- Talk track: The sharpest example is VideoEspresso with GPT-4o: the baseline is 26.4, and GPT-4o plus REVISE reaches 48.9 using about eight frames total. That is not a marginal gain. It suggests the model had usable reasoning capacity already, but needed a better way to acquire evidence. The same pattern continues on NExT-QA and EgoSchema, and it is not exclusive to GPT-4o because open backbones like Qwen2-VL and InternVL2 also improve on VideoEspresso.
+- Optional expansion: If I were to summarize this slide in one line, it would be: the controller changes the operating point of the backbone more than we would expect from simple prompt tinkering.
 
 ## s28_efficiency
-- Main point:
-- Talk track:
-- Optional expansion:
+- Main point: The paper's strongest systems claim is efficiency at low frame counts, not absolute dominance on every benchmark.
+- Talk track: REVISE usually finishes in the high-single-digit frame range, which is dramatically smaller than the input counts used by many long-video baselines. On NExT-QA, the paper highlights that it uses three to four times fewer inputs than systems like LVNet and SeViLA, and much less than heavier methods like VideoTree or LLoVi. On EgoSchema it stays close to VideoAgent's low-frame regime while avoiding an external captioner. The fair reading is that REVISE trades some peak accuracy for a simple, efficient, and inspectable controller.
+- Optional expansion: That trade-off is actually part of the appeal in an internal systems setting, where frame cost and latency are often first-class constraints.
 
 ## s29_ablation_rounds
-- Main point:
-- Talk track:
-- Optional expansion:
+- Main point: More turns help because they create opportunities to revise the search, not because they force the model to look at many more frames.
+- Talk track: The turn ablation is subtle but important. One turn gets 38.3 accuracy with 4.60 frames. By four turns, accuracy rises to 42.1 while the average selected frames drop to 2.89 and the mean number of rounds is only about 2.28. So allowing more turns does not mean the model always uses them. It means the controller can ask a targeted follow-up when needed and stop when it is not.
+- Optional expansion: This is one of the cleanest pieces of evidence that iteration is doing conceptual work beyond just increasing context.
 
 ## s30_ablation_components
-- Main point:
-- Talk track:
-- Optional expansion:
+- Main point: The summary state is load-bearing, and both carryover and structure matter.
+- Talk track: The full system reaches 41.48 accuracy. If we remove state carryover, the score falls to 23.14. If we keep carryover but remove the structured POHR fields, it falls to 24.27. Removing both drops it further to 20.24. I read this as very strong evidence that REVISE is not winning simply because it can ask for more frames. It wins because each round leaves behind a usable, cumulative reasoning state.
+- Optional expansion: This ablation is what makes the summary-as-state claim credible rather than rhetorical.
 
 ## s31_empirical_takeaway
-- Main point:
-- Talk track:
-- Optional expansion:
+- Main point: The experiments validate the controller design more than any one backbone choice.
+- Talk track: If I compress the entire empirical section into one statement, it is this: strong backbones benefit from a better interface to sparse evidence. The method works best when we judge it on the frontier of accuracy versus frames, and the ablations trace the gains back to the paper's central design idea of a structured cumulative state. That is why I think the experiments mostly support the conceptual thesis of the paper.
+- Optional expansion: In other words, the method section and the results section line up unusually well here. The experiments test the exact thing the paper says matters.
 
 ## Closing
 
 ## s32_takeaways
-- Main point:
-- Talk track:
-- Optional expansion:
+- Main point: The closing takeaway is about problem framing, controller design, and memory design.
+- Talk track: My three takeaways are intentionally simple. First, long-video QA is best seen as selective evidence gathering, not dense viewing. Second, REVISE turns that into a concrete iterative loop over read, summarize, and either request or answer. Third, the summary-as-state idea is the most reusable conceptual contribution, because it says what kind of memory object an agentic video system should carry forward.
+- Optional expansion: Even if future methods outperform REVISE, I would expect many of them to inherit this same basic framing.
 
 ## s33_open_questions
-- Main point:
-- Talk track:
-- Optional expansion:
+- Main point: The open questions are mostly about how far this memory-and-control pattern can scale.
+- Talk track: I want to frame this slide gently rather than as reviewer criticism. REVISE seems strongest when a few targeted glimpses can resolve the question. Harder cases may require many weak clues spread across time, or richer state than POHR alone can comfortably hold. So the discussion question is not whether the paper works in its intended setting. It is what the next memory object should look like when the sparse-evidence story becomes more demanding.
+- Optional expansion: Another useful discussion axis is when we should value efficiency and interpretability over chasing the strongest high-frame leaderboard.
 
 ## s34_qa
-- Main point:
-- Talk track:
-- Optional expansion:
+- Main point: The appendix is there to support discussion, not to reopen the whole talk.
+- Talk track: For Q and A, I have backup on three likely directions: extra benchmark numbers including the RL setting, more detail on how EAGER shapes behavior, and a stronger read of the component ablation. I also kept one related-work slide in reserve in case the conversation turns to where REVISE sits relative to caption pipelines, selectors, and agentic systems.
+- Optional expansion: If time is short, the single discussion prompt I would keep is: what is the right persistent state for iterative long-video reasoning?
+
+## Appendix
+
+## a01_more_benchmarks
+- Main point: The RL results are backup evidence that the sparse-control pattern is learnable, not just promptable.
+- Talk track: The RL numbers are lower than the strongest plug-and-play GPT-4o results, but they are valuable for a different reason. They show that an open-model policy can stay in an even tighter sparse regime, around four frames and roughly one and a third rounds, while still achieving useful accuracy on VideoEspresso and NExT-QA. That is evidence that the controller loop can be trained as a policy rather than only orchestrated externally.
+- Optional expansion: I would use this slide mainly if someone asks whether the paper is an interface trick or a learnable decision problem. The answer is: both.
+
+## a02_reward_details
+- Main point: EAGER tries to turn good sparse-browsing behavior into a shaped reward without dense supervision.
+- Talk track: I would not present EAGER as a formula to memorize. The conceptual pieces are enough. Confidence gain says extra frames should earn reward only when they help. Summary sufficiency says the carried state should be useful enough that the answer is recoverable from it. Correct-and-early stop keeps the policy from browsing forever. Format validity is small but practical, because the whole loop depends on well-formed structured output.
+- Optional expansion: The summary-sufficiency term is the most distinctive part because it directly trains the memory object, not only the final answer.
+
+## a03_component_ablation
+- Main point: The component ablation is the strongest evidence that memory design is causal here.
+- Talk track: This is the slide I would pull up if someone asks whether POHR is just presentation polish. The answer appears to be no. Both removing carryover and removing structured fields cause large accuracy drops, and removing both is worse still. The clean interpretation is that REVISE needs a cumulative state and needs that state to have explicit slots for evidence, hypotheses, and uncertainty.
+- Optional expansion: For me, this is the single most convincing mechanistic result in the paper.
+
+## a04_related_work_extra
+- Main point: The cleanest related-work comparison is to ask what each family remembers and how it decides what to inspect next.
+- Talk track: Caption and memory systems remember compressed text. Single-pass selectors remember a relevance ranking. REVISE-like agentic systems remember an evolving reasoning state. That framing makes the differences easier to discuss than a raw method list, because it keeps attention on the control problem and the memory problem the paper is actually addressing.
+- Optional expansion: This is also a helpful slide if the group wants to generalize beyond video QA and ask whether similar state designs could matter in other multimodal agent settings.

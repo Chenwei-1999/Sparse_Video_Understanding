@@ -607,6 +607,398 @@ const slides = [
     },
     citations: ["REVISE", "RAGEN"],
     notesKey: "s25_method_takeaway"
+  },
+  {
+    id: "s26_setup",
+    section: "results",
+    layout: "comparison",
+    title: "How To Read The Experiments",
+    bullets: [
+      "The experimental question is not only whether REVISE can improve accuracy, but whether it can do so while staying in a deliberately small visual budget"
+    ],
+    columns: [
+      {
+        header: "Controller budget",
+        items: [
+          "Maximum 3 frames per round",
+          "Maximum 4 rounds",
+          "Early stopping is allowed and preferred"
+        ]
+      },
+      {
+        header: "Evaluation lens",
+        items: [
+          "Track both answer accuracy and total frames used",
+          "Interpret results as an accuracy-efficiency trade-off",
+          "Ask whether iterative access changes the regime, not just the score"
+        ]
+      },
+      {
+        header: "Plug-and-play scope",
+        items: [
+          "Backbones include GPT-4o, Qwen2-VL, Qwen2.5-VL, and InternVL2",
+          "The controller wraps the model instead of retraining it",
+          "This isolates the value of the interaction pattern itself"
+        ]
+      }
+    ],
+    citations: ["REVISE", "VideoEspresso", "NExT-QA", "EgoSchema"],
+    notesKey: "s26_setup"
+  },
+  {
+    id: "s27_main_results",
+    section: "results",
+    layout: "claim",
+    title: "REVISE Improves Accuracy In A Small-Frame Regime",
+    figureLabel: "Plug-and-play results",
+    bullets: [
+      "On VideoEspresso, GPT-4o rises from 26.4 to 48.9 accuracy while using about 8.0 total frames, showing that iterative access changes the answer quality regime rather than nudging it slightly",
+      "The same pattern holds on NExT-QA and the EgoSchema subset: GPT-4o + REVISE reaches 63.8 with 8.4 frames and 60.6 with 9.8 frames",
+      "The controller is not tied to one proprietary model: on VideoEspresso, Qwen2-VL improves from 28.5 to 37.8 and InternVL2 improves from 28.7 to 32.1"
+    ],
+    asset: {
+      kind: "image",
+      path: LOCAL_ASSETS.pareto,
+      caption: "Accuracy and frame budget move together when the controller can iterate."
+    },
+    citations: ["REVISE", "VideoEspresso", "NExT-QA", "EgoSchema"],
+    notesKey: "s27_main_results"
+  },
+  {
+    id: "s28_efficiency",
+    section: "results",
+    layout: "comparison",
+    title: "The Main Win Is The Small-Frame Operating Regime",
+    bullets: [
+      "The paper's efficiency claim is best read as: REVISE stays in single-digit frame counts while remaining competitive enough to make sparse reasoning practical"
+    ],
+    columns: [
+      {
+        header: "What small-frame means here",
+        items: [
+          "Most reported REVISE runs finish with roughly 8 to 10 frames total",
+          "The controller is allowed four rounds, but often stops earlier",
+          "This is closer to targeted evidence inspection than to dense viewing"
+        ]
+      },
+      {
+        header: "Why that matters",
+        items: [
+          "On NExT-QA, REVISE uses 3 to 4 times fewer inputs than LVNet and SeViLA",
+          "It uses far fewer inputs than heavy-context systems like VideoTree and LLoVi",
+          "On EgoSchema, it stays near VideoAgent's low-frame regime without relying on a captioner"
+        ]
+      },
+      {
+        header: "Trade-off to state plainly",
+        items: [
+          "The strongest high-frame baselines can still win on absolute accuracy",
+          "REVISE is appealing because the controller is simple, efficient, and plug-and-play",
+          "So the result is not 'best everywhere' but 'strong accuracy for very little visual budget'"
+        ]
+      }
+    ],
+    citations: ["REVISE", "LVNet", "SeViLA", "VideoTree", "LLoVi", "VideoAgent"],
+    notesKey: "s28_efficiency"
+  },
+  {
+    id: "s29_ablation_rounds",
+    section: "results",
+    layout: "claim",
+    title: "More Iteration Can Help Without Blowing Up The Budget",
+    figureLabel: "Turn-budget ablation",
+    bullets: [
+      "The turn ablation is useful because it shows iteration is not equivalent to indiscriminately adding more frames: one turn gets 38.3 accuracy with 4.60 frames, while four turns reach 42.1 with only 2.89 selected frames on average",
+      "The three-turn and four-turn settings are especially revealing: accuracy rises to 41.6 and 42.1 while average rounds stay near the low twos, so the model is learning to use optional follow-up rather than always taking it",
+      "The practical reading is that extra turns buy opportunities to correct an incomplete first guess, not a license to flood the model with context"
+    ],
+    asset: {
+      kind: "image",
+      path: LOCAL_ASSETS.pareto,
+      caption: "Turn ablation shows a better accuracy-budget frontier, not just more viewing."
+    },
+    citations: ["REVISE"],
+    notesKey: "s29_ablation_rounds"
+  },
+  {
+    id: "s30_ablation_components",
+    section: "results",
+    layout: "comparison",
+    title: "State Carryover And Structure Are Doing Real Work",
+    bullets: [
+      "The component ablation strongly suggests that REVISE works because it preserves a disciplined state, not just because it can ask for more frames"
+    ],
+    columns: [
+      {
+        header: "Full system",
+        items: [
+          "41.48 accuracy",
+          "2.79 average turns",
+          "22.71 seconds",
+          "State carryover plus structured POHR"
+        ]
+      },
+      {
+        header: "No state carryover",
+        items: [
+          "23.14 accuracy",
+          "Large drop despite the same general loop",
+          "Shows that round-to-round memory is essential"
+        ]
+      },
+      {
+        header: "No structured POHR",
+        items: [
+          "24.27 accuracy",
+          "Free-form summary is not a drop-in substitute",
+          "The schema helps preserve usable reasoning state"
+        ]
+      },
+      {
+        header: "Neither",
+        items: [
+          "20.24 accuracy",
+          "Worst result in the ablation",
+          "Removing carryover and structure largely collapses the method"
+        ]
+      }
+    ],
+    citations: ["REVISE"],
+    notesKey: "s30_ablation_components"
+  },
+  {
+    id: "s31_empirical_takeaway",
+    section: "results",
+    layout: "context",
+    title: "Empirical Takeaway: The Controller Matters",
+    bullets: [
+      "The experiments support the claim that better control over frame access can produce large gains even when the backbone is unchanged",
+      "Those gains appear in a sparse regime: REVISE is most compelling when we care about what accuracy we can buy with only a few visual glimpses",
+      "The ablations point back to the paper's conceptual center: iterative retrieval helps, but it helps most when the state is cumulative and structured"
+    ],
+    citations: ["REVISE"],
+    notesKey: "s31_empirical_takeaway"
+  },
+  {
+    id: "s32_takeaways",
+    section: "closing",
+    layout: "context",
+    title: "Three Takeaways",
+    bullets: [
+      "Long-video QA is fundamentally a selective evidence problem",
+      "REVISE turns frame access into an iterative reasoning loop",
+      "Summary-as-state is the conceptual center of the paper"
+    ],
+    citations: [],
+    notesKey: "s32_takeaways"
+  },
+  {
+    id: "s33_open_questions",
+    section: "closing",
+    layout: "comparison",
+    title: "Open Questions After A Sympathetic Reading",
+    bullets: [
+      "The remaining questions are mostly about where this controller pattern scales cleanly and where richer memory or stronger retrieval policies would be needed"
+    ],
+    columns: [
+      {
+        header: "Where might it break",
+        items: [
+          "Questions that require many weak clues spread over long time ranges",
+          "Tasks where the missing evidence is hard to localize from an early summary",
+          "Settings where fine spatial detail matters more than sparse event cues"
+        ]
+      },
+      {
+        header: "What seems promising",
+        items: [
+          "Better state representations without replaying raw history",
+          "Controllers that combine sparse frame access with stronger temporal tools",
+          "Hybrid systems that keep direct frame access but add lightweight external memory"
+        ]
+      },
+      {
+        header: "Discussion lens",
+        items: [
+          "How much of the gain comes from the protocol versus the backbone following it well",
+          "When should we prefer efficiency and inspectability over absolute peak accuracy",
+          "What would a harder benchmark for iterative evidence gathering look like"
+        ]
+      }
+    ],
+    citations: ["REVISE", "VideoAgent", "VideoTree"],
+    notesKey: "s33_open_questions"
+  },
+  {
+    id: "s34_qa",
+    section: "closing",
+    layout: "context",
+    title: "Q&A",
+    bullets: [
+      "Appendix backup slides cover extra benchmark numbers, EAGER reward design, component ablations, and a wider related-work comparison",
+      "If useful, we can discuss the paper either as a systems idea for sparse video access or as an RL problem over select-versus-answer decisions",
+      "The question I would keep on the table is simple: what is the right memory object for iterative long-video reasoning"
+    ],
+    citations: [],
+    notesKey: "s34_qa"
+  },
+  {
+    id: "a01_more_benchmarks",
+    section: "appendix",
+    layout: "comparison",
+    title: "Appendix: Extra Benchmark Numbers",
+    bullets: [
+      "These backup numbers are useful when the discussion shifts from the main plug-and-play story to how the learned policy behaves in the same sparse-control framework"
+    ],
+    columns: [
+      {
+        header: "VideoEspresso RL",
+        items: [
+          "27.8 accuracy",
+          "4.1 frames",
+          "1.37 rounds",
+          "1.02 seconds"
+        ]
+      },
+      {
+        header: "NExT-QA RL",
+        items: [
+          "51.3 accuracy",
+          "3.9 frames",
+          "1.32 rounds",
+          "0.62 seconds"
+        ]
+      },
+      {
+        header: "How to read it",
+        items: [
+          "RL keeps the sparse regime even tighter than plug-and-play",
+          "The learned policy is still making select-versus-answer trade-offs under a tiny frame budget",
+          "This supports the idea that the loop itself is learnable, not only promptable"
+        ]
+      }
+    ],
+    citations: ["REVISE", "VideoEspresso", "NExT-QA"],
+    notesKey: "a01_more_benchmarks"
+  },
+  {
+    id: "a02_reward_details",
+    section: "appendix",
+    layout: "comparison",
+    title: "Appendix: EAGER Reward Details",
+    bullets: [
+      "EAGER is best read as a reward decomposition that tries to teach useful browsing behavior without requiring dense supervision over which frames were 'correct'"
+    ],
+    columns: [
+      {
+        header: "Confidence gain",
+        items: [
+          "Reward new frames only if they increase answer confidence",
+          "Discourages pointless extra queries",
+          "Pushes the controller toward informative follow-up"
+        ]
+      },
+      {
+        header: "Summary sufficiency",
+        items: [
+          "Checks whether the final answer is recoverable from the summary state",
+          "Directly trains the carryover state to stay useful",
+          "Aligns memory quality with final-task utility"
+        ]
+      },
+      {
+        header: "Correct-and-early stop",
+        items: [
+          "Reward correct answers that stop within the budget",
+          "Makes sparse completion a first-class objective",
+          "Prevents the policy from treating more rounds as free"
+        ]
+      },
+      {
+        header: "Format validity",
+        items: [
+          "Small reward for valid structured output",
+          "Keeps the protocol machine-readable",
+          "Important because the loop depends on well-formed tags and fields"
+        ]
+      }
+    ],
+    citations: ["REVISE"],
+    notesKey: "a02_reward_details"
+  },
+  {
+    id: "a03_component_ablation",
+    section: "appendix",
+    layout: "comparison",
+    title: "Appendix: Stronger Read Of The Component Ablation",
+    bullets: [
+      "The ablation table is worth keeping in backup because it sharpens the paper's mechanistic claim: summary design is not cosmetic, it is load-bearing"
+    ],
+    columns: [
+      {
+        header: "Carryover",
+        items: [
+          "Removing carryover drops accuracy from 41.48 to 23.14",
+          "The model loses cumulative evidence across rounds",
+          "Iteration without memory becomes mostly reset behavior"
+        ]
+      },
+      {
+        header: "POHR structure",
+        items: [
+          "Removing structured fields drops accuracy to 24.27",
+          "The model still writes text, but the state becomes less usable",
+          "Explicit evidence and uncertainty slots matter"
+        ]
+      },
+      {
+        header: "Combined removal",
+        items: [
+          "No carryover plus no structure falls to 20.24",
+          "That is below either single ablation",
+          "The two design choices reinforce each other"
+        ]
+      }
+    ],
+    citations: ["REVISE"],
+    notesKey: "a03_component_ablation"
+  },
+  {
+    id: "a04_related_work_extra",
+    section: "appendix",
+    layout: "comparison",
+    title: "Appendix: Extra Related-Work Framing",
+    bullets: [
+      "If the discussion turns outward, REVISE is easiest to place by asking what each family chooses as its primary memory object and control policy"
+    ],
+    columns: [
+      {
+        header: "Caption / memory systems",
+        items: [
+          "Primary memory is text or compressed summaries",
+          "Strength is scale across long videos",
+          "Risk is losing answer-critical visual detail too early"
+        ]
+      },
+      {
+        header: "Single-pass selectors",
+        items: [
+          "Primary control move is one relevance decision",
+          "Strength is cheaper inference than dense viewing",
+          "Risk is committing before uncertainty is well characterized"
+        ]
+      },
+      {
+        header: "REVISE-like agentic loops",
+        items: [
+          "Primary memory is an evolving reasoning state",
+          "Strength is targeted follow-up and visible stopping logic",
+          "Open question is how rich that state must become for harder tasks"
+        ]
+      }
+    ],
+    citations: ["REVISE", "MovieChat", "VideoAgent", "VideoTree", "Q-Frame"],
+    notesKey: "a04_related_work_extra"
   }
 ];
 
