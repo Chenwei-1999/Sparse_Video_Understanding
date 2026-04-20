@@ -20,7 +20,7 @@ const layoutRenderers = {
   title_hero: renderTitleHeroSlide,
   preview: renderPreviewSlide,
   taxonomy: renderTaxonomySlide,
-  benchmark_compare: renderComparisonSlide,
+  benchmark_compare: renderTakeawaySlide,
   comparison: renderComparisonSlide,
   agenda: renderTakeawaySlide,
   context: renderTakeawaySlide,

@@ -254,6 +254,15 @@ function addCard(slide, card) {
   }
 }
 
+function humanizeKey(value) {
+  return String(value)
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replace(/[_-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
 function resolveAssetPath(assetPath) {
   return path.resolve(__dirname, '..', '..', assetPath);
 }
@@ -268,6 +277,14 @@ function addAssetPanel(slide, asset, box) {
     fill: { color: COLORS.white },
     line: { color: COLORS.line, width: 1 },
   });
+
+  if (asset && asset.kind && asset.kind !== 'image') {
+    throw new Error(`Unsupported asset kind "${asset.kind}" for asset panel`);
+  }
+
+  if (asset?.kind === 'image' && !asset.path) {
+    throw new Error('Image asset is missing a path');
+  }
 
   if (asset?.path) {
     slide.addImage({
@@ -321,38 +338,21 @@ function renderPreviewSlide(slide, slideData) {
   applyPaperBackground(slide);
   addSlideTitle(slide, slideData.title, slideData.section);
 
-  const introX = MARGIN.left;
-  const introW = 4.0;
-  const cardX = introX + introW + MARGIN.gutter;
-  const cardW = PAGE.width - MARGIN.right - cardX;
-  const cardH = 1.35;
+  const bullets = slideData.bullets || [];
+  const cardCount = bullets.length;
+  const columns = cardCount > 3 ? 2 : 1;
+  const rows = cardCount > 0 ? Math.ceil(cardCount / columns) : 1;
+  const availableW = PAGE.width - MARGIN.left - MARGIN.right - (columns - 1) * MARGIN.gutter;
+  const cardW = availableW / columns;
+  const availableH = PAGE.height - PAGE.contentTop - 0.86 - (rows - 1) * 0.18;
+  const cardH = cardCount > 0 ? availableH / rows : 1.4;
 
-  slide.addText('The framing for the talk', {
-    x: introX,
-    y: PAGE.contentTop - 0.12,
-    w: introW,
-    h: 0.32,
-    margin: 0,
-    fontFace: FONTS.accent,
-    fontSize: TYPE.subtitle,
-    color: COLORS.navy,
-    bold: true,
-  });
-
-  addBodyCopy(
-    slide,
-    [
-      'This opening slide should read like an editorial memo: concise thesis on the left, concrete takeaways on the right.',
-      'The cards turn the preview bullets into distinct promises for the rest of the deck.'
-    ],
-    { x: introX, y: PAGE.contentTop + 0.32, w: introW - 0.2, h: 2.15 },
-    { fontSize: TYPE.body, color: COLORS.charcoal },
-  );
-
-  slideData.bullets.slice(0, 3).forEach((bullet, index) => {
+  bullets.forEach((bullet, index) => {
+    const column = index % columns;
+    const row = Math.floor(index / columns);
     addCard(slide, {
-      x: cardX,
-      y: PAGE.contentTop + index * (cardH + 0.22),
+      x: MARGIN.left + column * (cardW + MARGIN.gutter),
+      y: PAGE.contentTop + row * (cardH + 0.18),
       w: cardW,
       h: cardH,
       kicker: `Preview 0${index + 1}`,
@@ -449,8 +449,9 @@ function renderFigureSlide(slide, slideData) {
 
 function renderComparisonSlide(slide, slideData) {
   if (!slideData.comparisons?.length && !slideData.columns?.length) {
-    renderTakeawaySlide(slide, slideData);
-    return;
+    throw new Error(
+      `Comparison slide "${slideData.id || slideData.title || 'unknown'}" is missing both comparisons and columns data`,
+    );
   }
 
   applyPaperBackground(slide);
@@ -474,36 +475,22 @@ function renderComparisonSlide(slide, slideData) {
   const contentH = PAGE.height - contentY - 0.82;
 
   if (slideData.comparisons?.length) {
-    const colW = (PAGE.width - MARGIN.left - MARGIN.right - 2 * MARGIN.gutter) / 3;
+    const comparisonKeys = Object.keys(slideData.comparisons[0] || {});
+    const colW =
+      (PAGE.width - MARGIN.left - MARGIN.right - (comparisonKeys.length - 1) * MARGIN.gutter) /
+      comparisonKeys.length;
 
-    addCard(slide, {
-      x: MARGIN.left,
-      y: contentY,
-      w: colW,
-      h: contentH,
-      kicker: 'Aspect',
-      title: 'Decision axis',
-      body: slideData.comparisons.map((item) => item.aspect),
-    });
-
-    addCard(slide, {
-      x: MARGIN.left + colW + MARGIN.gutter,
-      y: contentY,
-      w: colW,
-      h: contentH,
-      kicker: 'Family A',
-      title: 'First side',
-      body: slideData.comparisons.map((item) => item.familyA),
-    });
-
-    addCard(slide, {
-      x: MARGIN.left + 2 * (colW + MARGIN.gutter),
-      y: contentY,
-      w: colW,
-      h: contentH,
-      kicker: 'Family B',
-      title: 'Second side',
-      body: slideData.comparisons.map((item) => item.familyB),
+    comparisonKeys.forEach((key, index) => {
+      const header = slideData.comparisonHeaders?.[key];
+      addCard(slide, {
+        x: MARGIN.left + index * (colW + MARGIN.gutter),
+        y: contentY,
+        w: colW,
+        h: contentH,
+        kicker: header?.kicker || humanizeKey(key),
+        title: header?.title || humanizeKey(key),
+        body: slideData.comparisons.map((item) => String(item[key] ?? '')),
+      });
     });
   } else if (slideData.columns?.length) {
     const cardW = (PAGE.width - MARGIN.left - MARGIN.right - MARGIN.gutter) / 2;
@@ -513,8 +500,8 @@ function renderComparisonSlide(slide, slideData) {
         y: contentY,
         w: cardW,
         h: contentH,
-        kicker: slideData.section,
-        title: column.label,
+        kicker: column.kicker || slideData.section,
+        title: column.label || humanizeKey(`column ${index + 1}`),
         body: column.points,
       });
     });
