@@ -79,59 +79,59 @@
 ## REVISE Core Idea
 
 ## s15_overview
-- Main point:
-- Talk track:
-- Optional expansion:
+- Main point: REVISE should be understood as a three-part system for sparse evidence gathering, not as a single clever sampler.
+- Talk track: This is the anchor slide for the method section. The paper's claim is that long-video QA breaks because models both see too much irrelevant content and lack a clean way to represent what key evidence is still missing. REVISE answers that with three linked pieces: a multi-round controller, a structured response format, and a summary-as-state. I want the audience to see that those pieces only really make sense together. The controller chooses what to inspect next, the protocol forces the reasoning into a visible format, and the summary keeps the memory small and cumulative.
+- Optional expansion: If someone asks what is novel here, I would say the distinctive part is not iteration alone. It is iteration plus disciplined state.
 
 ## s16_one_shot_vs_iterative
-- Main point:
-- Talk track:
-- Optional expansion:
+- Main point: The real contrast is between one-shot relevance guessing and iterative evidence revision.
+- Talk track: A one-shot selector has to guess the important frames before it has learned much from the video. That can work when the signal is obvious, but it breaks when the first evidence is only partially informative. REVISE instead treats selection as something that can be revised. After each round, the model has an explicit account of what it saw, what it currently believes, and what still needs to be checked. That is why I would not describe REVISE as just a better selector. It is closer to a controller that can recover from incomplete first guesses.
+- Optional expansion: For a mixed audience, I would translate this as the difference between taking one educated guess and being allowed to ask one more targeted question.
 
 ## s17_summary_as_state
-- Main point:
-- Talk track:
-- Optional expansion:
+- Main point: The summary-as-state is the main memory discipline of the method.
+- Talk track: This is the design move I most want people to remember. Only the structured summary persists across rounds. The system does not keep replaying all previous frames or the entire dialogue history as if bigger context were automatically better. Instead, the latest summary is supposed to be cumulative, meaning it already carries forward what matters from prior rounds. That keeps the active context compact, and it also makes the method more inspectable because we can read the state directly.
+- Optional expansion: This is a good place to emphasize that memory compression here is question-aware. The state is not a generic video summary; it is a reasoning state for this question.
 
 ## s18_pohr
-- Main point:
-- Talk track:
-- Optional expansion:
+- Main point: POHR is how REVISE turns hidden reasoning state into a readable schema.
+- Talk track: The POHR fields look simple, but they do important work. P says what has already been covered, so the loop has a sense of prior evidence. O records the current observations so the state stays tied to what was actually seen. Then H, U, and R together represent the reasoning frontier: what the model now thinks, what is still uncertain, and why the next frames are needed. For the audience, the important point is that this is not decorative formatting. It is the mechanism that makes the loop explicit and inspectable.
+- Optional expansion: If someone is skeptical about structured fields, I would point out that the paper's ablations suggest this structure matters, not just the presence of any summary text.
 
 ## s19_loop
-- Main point:
-- Talk track:
-- Optional expansion:
+- Main point: Each round is intentionally small, and the stop decision is part of the algorithm rather than an afterthought.
+- Talk track: The loop is operationally straightforward. Start from a small seed set of frames, update the POHR summary, and then choose between two actions: request a few more frame indices or answer the question. The controller repeats that process until either the evidence is sufficient or the turn budget is exhausted. I want to stress that stopping early is a feature here, not a failure to use the full budget. The method is designed to answer once uncertainty has been reduced enough, which is why the efficiency numbers later are meaningful.
+- Optional expansion: This is also where the visible tags matter. The output format makes the controller's action legible to the external system.
 
 ## s20_worked_example
-- Main point:
-- Talk track:
-- Optional expansion:
+- Main point: The value of REVISE is easier to understand as evidence accumulation than as an abstract controller.
+- Talk track: This is the slide where I want you to picture the loop in action. The first few frames give only a partial story, so the model cannot answer responsibly yet. Instead, it writes down what it has seen and, crucially, what specific uncertainty remains. That uncertainty then justifies the follow-up request. The second round is not broader; it is narrower and more targeted. By the end, the answer comes from a small number of frames because the controller used the first round to decide what evidence was actually missing.
+- Optional expansion: This is a useful moment to connect the method to interpretability. We can inspect why the extra frames were requested instead of treating the whole decision process as a dense black box.
 
 ## s21_pnp_mode
-- Main point:
-- Talk track:
-- Optional expansion:
+- Main point: Plug-and-play mode matters because the core idea works even when the backbone model is frozen.
+- Talk track: One strength of the paper is that it can test the method without asking us to buy into a new trained model from day one. In plug-and-play mode, REVISE wraps an existing VLM and handles the multi-round orchestration externally. That means the weights do not change, the visual encoder does not change, and even proprietary APIs can be used. Conceptually, this helps isolate the contribution of the controller design itself. If performance improves under this setup, it suggests the interaction pattern is doing real work.
+- Optional expansion: For the audience, the takeaway is that REVISE is not only a training recipe. It is also an interface pattern for how to use strong vision-language models more selectively.
 
 ## s22_rl_mode
-- Main point:
-- Talk track:
-- Optional expansion:
+- Main point: In the RL version, the same loop becomes a learned policy over select-versus-answer decisions.
+- Talk track: Once the paper moves to open models, it reinterprets the interaction as a finite-horizon MDP. The state includes the current prompt, the latest summary, and the frames already admitted. The actions are exactly the same as before: request more frames or answer now. What changes is that the model is now trained to improve the quality of those choices. That framing is important because it shows the method is not split into two unrelated systems. The plug-and-play and RL variants share the same basic control loop.
+- Optional expansion: If someone asks why RL instead of supervised learning, the short answer is that good frame requests and good stopping behavior are sequential decisions with delayed payoff.
 
 ## s23_eager_reward
-- Main point:
-- Talk track:
-- Optional expansion:
+- Main point: EAGER tries to reward the right kind of behavior without requiring frame-level annotations.
+- Talk track: I would present EAGER as a practical reward decomposition rather than a formula to memorize. First, it rewards confidence gain, meaning a frame request should earn credit only if the new evidence actually sharpens the answer. Second, it rewards summary sufficiency, which checks whether the final answer is recoverable from the summary alone. Third, it rewards being correct and stopping early. Then there is a small format-validity bonus because the protocol itself has to remain usable. Together these terms push the model toward sparse, faithful, and well-formed reasoning rather than just longer interaction.
+- Optional expansion: The summary-sufficiency term is especially nice because it directly trains the state to carry useful information instead of becoming empty boilerplate.
 
 ## s24_why_it_works
-- Main point:
-- Talk track:
-- Optional expansion:
+- Main point: REVISE helps because it ties together sparse retrieval, explicit uncertainty, and disciplined memory.
+- Talk track: By this point in the section, I want to synthesize the method logic. REVISE reduces overload by keeping the per-round visual budget small. It improves key-information awareness by forcing the model to externalize what is known and unknown. And it becomes easier to inspect because the control state is visible in POHR instead of buried in hidden activations or long chat history. So the method's advantage is not any single trick. It is the combination of a compact state, uncertainty-driven follow-up, and an explicit stop rule.
+- Optional expansion: This is also the place to remind the audience that sparse video reasoning is partly a systems problem. Better control can matter as much as a larger backbone.
 
 ## s25_method_takeaway
-- Main point:
-- Talk track:
-- Optional expansion:
+- Main point: The one-slide memory is that REVISE is a sparse evidence controller with explicit state.
+- Talk track: If the audience forgets the notation, I still want them to leave with three statements. First, REVISE is not just selecting frames once; it is iterating. Second, the memory is not free-form; it is structured and cumulative. Third, the same core design supports both frozen plug-and-play use and learned RL control. That is the conceptual payload of the method section, and it sets up why the later results should be interpreted as evidence for the control design rather than only for a particular backbone model.
+- Optional expansion: This is a good transition slide into experiments because it tells the audience exactly what claims the empirical section needs to validate.
 
 ## Experiments
 
