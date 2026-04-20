@@ -1,10 +1,6 @@
 const slides = [
-  {
-    title: 'REVISE Reading Group',
-  },
-  {
-    title: 'Workspace scaffold',
-  },
+  { id: 'title', title: 'REVISE: Reasoning with Video Sparsity' },
+  { id: 'roadmap', title: 'Roadmap' },
 ];
 
 module.exports = {
