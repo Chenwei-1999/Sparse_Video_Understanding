@@ -1,5 +1,7 @@
 # Speaker Notes
 
+## Opening
+
 ## s01_title
 - Main point:
 - Talk track:
@@ -14,6 +16,8 @@
 - Main point:
 - Talk track:
 - Optional expansion:
+
+## Problem Setup
 
 ## s04_task
 - Main point:
@@ -39,6 +43,8 @@
 - Main point:
 - Talk track:
 - Optional expansion:
+
+## Landscape
 
 ## s09_field_shift
 - Main point:
@@ -69,6 +75,8 @@
 - Main point:
 - Talk track:
 - Optional expansion:
+
+## REVISE Core Idea
 
 ## s15_overview
 - Main point:
@@ -125,6 +133,8 @@
 - Talk track:
 - Optional expansion:
 
+## Experiments
+
 ## s26_setup
 - Main point:
 - Talk track:
@@ -154,6 +164,8 @@
 - Main point:
 - Talk track:
 - Optional expansion:
+
+## Closing
 
 ## s32_takeaways
 - Main point:
