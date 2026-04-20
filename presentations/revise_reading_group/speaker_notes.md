@@ -142,8 +142,8 @@
 
 ## s27_main_results
 - Main point: The main result is that iterative control produces large accuracy gains while staying in a single-digit frame regime.
-- Talk track: The sharpest example is VideoEspresso with GPT-4o: the baseline is 26.4, and GPT-4o plus REVISE reaches 48.9 using about eight frames total. That is not a marginal gain. It suggests the model had usable reasoning capacity already, but needed a better way to acquire evidence. The same pattern continues on NExT-QA and EgoSchema, and it is not exclusive to GPT-4o because open backbones like Qwen2-VL and InternVL2 also improve on VideoEspresso.
-- Optional expansion: If I were to summarize this slide in one line, it would be: the controller changes the operating point of the backbone more than we would expect from simple prompt tinkering.
+- Talk track: I removed the figure here because the available local image is the turn-ablation plot, not a main-results figure. The slide now reads as a compact results board, which is a better fit for the evidence we actually have. The sharpest example is still VideoEspresso with GPT-4o: 26.4 rises to 48.9 using about eight frames total. The same pattern continues on NExT-QA and EgoSchema, and it is not exclusive to GPT-4o because open backbones like Qwen2-VL and InternVL2 also improve on VideoEspresso.
+- Optional expansion: If I had to compress the message to one line, it would be: the controller changes the operating point of the backbone more than simple prompt variation would suggest.
 
 ## s28_efficiency
 - Main point: The paper's strongest systems claim is efficiency at low frame counts, not absolute dominance on every benchmark.
@@ -152,7 +152,7 @@
 
 ## s29_ablation_rounds
 - Main point: More turns help because they create opportunities to revise the search, not because they force the model to look at many more frames.
-- Talk track: The turn ablation is subtle but important. One turn gets 38.3 accuracy with 4.60 frames. By four turns, accuracy rises to 42.1 while the average selected frames drop to 2.89 and the mean number of rounds is only about 2.28. So allowing more turns does not mean the model always uses them. It means the controller can ask a targeted follow-up when needed and stop when it is not.
+- Talk track: The visible slide is intentionally terse, because the figure is already doing part of the work. The key numbers are the endpoints: one turn gets 38.3 accuracy with 4.60 frames, while four turns reach 42.1 with 2.89 selected frames. The subtle but important detail is that the mean number of rounds is only about 2.28, so allowing more turns does not mean the controller always spends them. It means the controller can ask a targeted follow-up when needed and stop when it is not.
 - Optional expansion: This is one of the cleanest pieces of evidence that iteration is doing conceptual work beyond just increasing context.
 
 ## s30_ablation_components
@@ -186,7 +186,7 @@
 
 ## a01_more_benchmarks
 - Main point: The RL results are backup evidence that the sparse-control pattern is learnable, not just promptable.
-- Talk track: The RL numbers are lower than the strongest plug-and-play GPT-4o results, but they are valuable for a different reason. They show that an open-model policy can stay in an even tighter sparse regime, around four frames and roughly one and a third rounds, while still achieving useful accuracy on VideoEspresso and NExT-QA. That is evidence that the controller loop can be trained as a policy rather than only orchestrated externally.
+- Talk track: This slide is now self-contained because it keeps the plug-and-play GPT-4o reference numbers beside the RL numbers. On VideoEspresso, plug-and-play reaches 48.9 with about eight frames, while RL gets 27.8 with 4.1 frames. On NExT-QA, the comparison is 63.8 with 8.4 frames versus 51.3 with 3.9 frames. So the point is not that RL beats plug-and-play here. The point is that the learned policy keeps roughly half the visual budget while staying recognizably functional.
 - Optional expansion: I would use this slide mainly if someone asks whether the paper is an interface trick or a learnable decision problem. The answer is: both.
 
 ## a02_reward_details
@@ -196,8 +196,8 @@
 
 ## a03_component_ablation
 - Main point: The component ablation is the strongest evidence that memory design is causal here.
-- Talk track: This is the slide I would pull up if someone asks whether POHR is just presentation polish. The answer appears to be no. Both removing carryover and removing structured fields cause large accuracy drops, and removing both is worse still. The clean interpretation is that REVISE needs a cumulative state and needs that state to have explicit slots for evidence, hypotheses, and uncertainty.
-- Optional expansion: For me, this is the single most convincing mechanistic result in the paper.
+- Talk track: I changed this backup slide so it does more than restate s30. The useful readout is the size and shape of the degradation. The full system reaches 41.48 with 2.79 turns and 22.71 seconds, so the baseline is not secretly buying accuracy by running forever. Removing carryover costs 18.34 points, removing POHR structure costs 17.21, and removing both costs 21.24. That pattern says the two ingredients are individually important and jointly reinforcing.
+- Optional expansion: For me, the most important part is the operational readout column: it translates the table from raw scores into an argument about what kind of loop failure each ablation induces.
 
 ## a04_related_work_extra
 - Main point: The cleanest related-work comparison is to ask what each family remembers and how it decides what to inspect next.

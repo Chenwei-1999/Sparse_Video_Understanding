@@ -648,19 +648,37 @@ const slides = [
   {
     id: "s27_main_results",
     section: "results",
-    layout: "claim",
+    layout: "comparison",
     title: "REVISE Improves Accuracy In A Small-Frame Regime",
-    figureLabel: "Plug-and-play results",
     bullets: [
-      "On VideoEspresso, GPT-4o rises from 26.4 to 48.9 accuracy while using about 8.0 total frames, showing that iterative access changes the answer quality regime rather than nudging it slightly",
-      "The same pattern holds on NExT-QA and the EgoSchema subset: GPT-4o + REVISE reaches 63.8 with 8.4 frames and 60.6 with 9.8 frames",
-      "The controller is not tied to one proprietary model: on VideoEspresso, Qwen2-VL improves from 28.5 to 37.8 and InternVL2 improves from 28.7 to 32.1"
+      "The main result is not one lucky benchmark. REVISE repeatedly buys better answers while staying in single-digit frame counts."
     ],
-    asset: {
-      kind: "image",
-      path: LOCAL_ASSETS.pareto,
-      caption: "Accuracy and frame budget move together when the controller can iterate."
-    },
+    columns: [
+      {
+        header: "VideoEspresso",
+        items: [
+          "GPT-4o: 26.4 -> 48.9 with ~8.0 frames",
+          "Qwen2-VL: 28.5 -> 37.8",
+          "InternVL2: 28.7 -> 32.1"
+        ]
+      },
+      {
+        header: "NExT-QA",
+        items: [
+          "GPT-4o + REVISE: 63.8",
+          "Average frame use: 8.4",
+          "Strong result in a sparse budget"
+        ]
+      },
+      {
+        header: "EgoSchema Subset",
+        items: [
+          "GPT-4o + REVISE: 60.6",
+          "Average frame use: 9.8",
+          "Low-frame regime transfers beyond one dataset"
+        ]
+      }
+    ],
     citations: ["REVISE", "VideoEspresso", "NExT-QA", "EgoSchema"],
     notesKey: "s27_main_results"
   },
@@ -708,9 +726,9 @@ const slides = [
     title: "More Iteration Can Help Without Blowing Up The Budget",
     figureLabel: "Turn-budget ablation",
     bullets: [
-      "The turn ablation is useful because it shows iteration is not equivalent to indiscriminately adding more frames: one turn gets 38.3 accuracy with 4.60 frames, while four turns reach 42.1 with only 2.89 selected frames on average",
-      "The three-turn and four-turn settings are especially revealing: accuracy rises to 41.6 and 42.1 while average rounds stay near the low twos, so the model is learning to use optional follow-up rather than always taking it",
-      "The practical reading is that extra turns buy opportunities to correct an incomplete first guess, not a license to flood the model with context"
+      "1 turn: 38.3 accuracy with 4.60 frames",
+      "4 turns: 42.1 accuracy with 2.89 selected frames",
+      "Average rounds ~2.28: extra turns are optional follow-up, not mandatory cost"
     ],
     asset: {
       kind: "image",
@@ -848,33 +866,33 @@ const slides = [
     layout: "comparison",
     title: "Appendix: Extra Benchmark Numbers",
     bullets: [
-      "These backup numbers are useful when the discussion shifts from the main plug-and-play story to how the learned policy behaves in the same sparse-control framework"
+      "This backup slide keeps the plug-and-play and RL settings on the same page so the trade-off is readable without the speaker notes."
     ],
     columns: [
       {
-        header: "VideoEspresso RL",
+        header: "VideoEspresso",
         items: [
-          "27.8 accuracy",
-          "4.1 frames",
-          "1.37 rounds",
-          "1.02 seconds"
+          "GPT-4o + REVISE: 48.9 with ~8.0 frames",
+          "RL: 27.8 with 4.1 frames",
+          "Delta: -21.1 accuracy for ~3.9 fewer frames",
+          "RL also averages 1.37 rounds and 1.02s"
         ]
       },
       {
-        header: "NExT-QA RL",
+        header: "NExT-QA",
         items: [
-          "51.3 accuracy",
-          "3.9 frames",
-          "1.32 rounds",
-          "0.62 seconds"
+          "GPT-4o + REVISE: 63.8 with 8.4 frames",
+          "RL: 51.3 with 3.9 frames",
+          "Delta: -12.5 accuracy for ~4.5 fewer frames",
+          "RL also averages 1.32 rounds and 0.62s"
         ]
       },
       {
         header: "How to read it",
         items: [
-          "RL keeps the sparse regime even tighter than plug-and-play",
-          "The learned policy is still making select-versus-answer trade-offs under a tiny frame budget",
-          "This supports the idea that the loop itself is learnable, not only promptable"
+          "RL pushes the budget even lower than plug-and-play",
+          "Plug-and-play remains the stronger accuracy story in this talk",
+          "Together they show the same loop is both promptable and learnable"
         ]
       }
     ],
@@ -930,36 +948,42 @@ const slides = [
     id: "a03_component_ablation",
     section: "appendix",
     layout: "comparison",
-    title: "Appendix: Stronger Read Of The Component Ablation",
+    title: "Appendix: What The Component Ablation Really Says",
     bullets: [
-      "The ablation table is worth keeping in backup because it sharpens the paper's mechanistic claim: summary design is not cosmetic, it is load-bearing"
+      "This backup slide turns the ablation into a diagnostic readout: how much accuracy is lost, and why the full system is not simply brute-forcing extra turns."
     ],
-    columns: [
+    comparisons: [
       {
-        header: "Carryover",
-        items: [
-          "Removing carryover drops accuracy from 41.48 to 23.14",
-          "The model loses cumulative evidence across rounds",
-          "Iteration without memory becomes mostly reset behavior"
-        ]
+        variant: "Full system",
+        accuracy: "41.48",
+        drop: "Baseline",
+        readout: "2.79 turns, 22.71s, cumulative state intact"
       },
       {
-        header: "POHR structure",
-        items: [
-          "Removing structured fields drops accuracy to 24.27",
-          "The model still writes text, but the state becomes less usable",
-          "Explicit evidence and uncertainty slots matter"
-        ]
+        variant: "No carryover",
+        accuracy: "23.14",
+        drop: "-18.34",
+        readout: "Rounds no longer accumulate evidence across steps"
       },
       {
-        header: "Combined removal",
-        items: [
-          "No carryover plus no structure falls to 20.24",
-          "That is below either single ablation",
-          "The two design choices reinforce each other"
-        ]
+        variant: "No structured POHR",
+        accuracy: "24.27",
+        drop: "-17.21",
+        readout: "Text persists, but evidence and uncertainty are poorly organized"
+      },
+      {
+        variant: "Neither",
+        accuracy: "20.24",
+        drop: "-21.24",
+        readout: "The loop collapses toward repeated weak guesses"
       }
     ],
+    comparisonHeaders: {
+      variant: { title: "Variant" },
+      accuracy: { title: "Accuracy" },
+      drop: { title: "Drop Vs Full" },
+      readout: { title: "Operational Readout" }
+    },
     citations: ["REVISE"],
     notesKey: "a03_component_ablation"
   },
