@@ -21,7 +21,7 @@ const slides = [
     ],
     asset: {
       kind: "image",
-      path: "assets/overview.png",
+      path: LOCAL_ASSETS.overview,
       caption: "REVISE overview"
     },
     citations: ["REVISE"],
@@ -95,7 +95,7 @@ const slides = [
     ],
     asset: {
       kind: "image",
-      path: "assets/summary_as_state.png",
+      path: LOCAL_ASSETS.summary,
       caption: "Summary-as-state as compact carryover memory"
     },
     citations: ["REVISE"],
@@ -127,7 +127,7 @@ const slides = [
     ],
     asset: {
       kind: "image",
-      path: "assets/sketch.png",
+      path: LOCAL_ASSETS.sketch,
       caption: "Multi-round example showing targeted follow-up frames"
     },
     citations: ["REVISE", "VideoAgent", "VideoTree"],
@@ -303,7 +303,7 @@ const slides = [
     ],
     asset: {
       kind: "image",
-      path: "assets/overview.png",
+      path: LOCAL_ASSETS.overview,
       caption: "Bridge from landscape to REVISE"
     },
     citations: ["REVISE", "VideoAgent", "VideoTree", "RAGEN"],
@@ -398,39 +398,30 @@ const slides = [
     layout: "comparison",
     title: "The Loop Is Read, Summarize, Then Either Select Or Answer",
     bullets: [
-      "Algorithmically, each round is small: inspect a few frames, update the POHR state, then choose between requesting more evidence or stopping"
+      "Each round is deliberately small: look at a few frames, update the summary, then either ask for more evidence or stop"
     ],
     columns: [
       {
-        header: "Round start",
+        header: "1. Read",
         items: [
-          "Begin from a small uniform seed set",
-          "Attach timestamps and video meta",
-          "Feed the latest summary together with the current frames"
+          "Start from a small seed set",
+          "Show timestamps and basic video meta",
+          "Condition on the latest summary plus current frames"
         ]
       },
       {
-        header: "State update",
+        header: "2. Summarize",
         items: [
-          "Write a new cumulative POHR summary",
-          "Record what changed relative to the last round",
-          "Keep the state interpretable instead of hidden"
+          "Write a new cumulative POHR state",
+          "Capture what changed and what remains unclear"
         ]
       },
       {
-        header: "Action",
+        header: "3. Act",
         items: [
-          "Emit `<frames>` to request new indices",
-          "Or emit `<answer>` when evidence is sufficient",
-          "The response format makes the controller externally visible"
-        ]
-      },
-      {
-        header: "Stopping behavior",
-        items: [
-          "Stop when uncertainty is resolved, not only when the turn budget ends",
-          "Maximum rounds cap the interaction cost",
-          "Early stopping is part of the efficiency story"
+          "Emit `<frames>` for targeted follow-up",
+          "Or emit `<answer>` when uncertainty is low",
+          "Maximum rounds cap cost, but early stopping is preferred"
         ]
       }
     ],
@@ -536,35 +527,28 @@ const slides = [
     layout: "comparison",
     title: "EAGER Rewards Evidence, State Quality, And Early Stopping",
     bullets: [
-      "The reward design is meant to train useful control behavior without needing dense frame-level supervision"
+      "EAGER trains the controller without frame-level labels by rewarding useful evidence gathering and disciplined stopping"
     ],
     columns: [
       {
-        header: "Confidence gain",
+        header: "Evidence gain",
         items: [
-          "Reward a frame request only if the new evidence improves answer confidence",
+          "Give credit only when new frames increase answer confidence",
           "This discourages pointless extra browsing"
         ]
       },
       {
-        header: "Summary sufficiency",
+        header: "State quality",
         items: [
           "Check whether the final answer is recoverable from the summary alone",
-          "This pushes the state to be faithful and compact"
+          "Reward valid structured output so the state stays usable"
         ]
       },
       {
-        header: "Correct-and-early stop",
+        header: "Correct early stop",
         items: [
           "Reward answering correctly within a small turn budget",
           "This aligns the learned policy with sparse inference"
-        ]
-      },
-      {
-        header: "Format bonus",
-        items: [
-          "Give a small bonus for valid tagged outputs",
-          "The protocol itself becomes easier to learn and trust"
         ]
       }
     ],
