@@ -5,6 +5,7 @@ const {
   createPresentation,
   renderComparisonSlide,
   renderFigureSlide,
+  renderGapSlide,
   renderPreviewSlide,
   renderTakeawaySlide,
   renderTaxonomySlide,
@@ -28,7 +29,7 @@ const layoutRenderers = {
   claim: renderFigureSlide,
   failure_case: renderFigureSlide,
   trend: renderTakeawaySlide,
-  gap: renderFigureSlide,
+  gap: renderGapSlide,
 };
 
 function getRenderer(layout) {

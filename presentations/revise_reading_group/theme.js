@@ -447,6 +447,10 @@ function renderFigureSlide(slide, slideData) {
   addCitationFooter(slide, slideData.citations);
 }
 
+function renderGapSlide(slide, slideData) {
+  renderFigureSlide(slide, slideData);
+}
+
 function renderComparisonSlide(slide, slideData) {
   if (!slideData.comparisons?.length && !slideData.columns?.length) {
     throw new Error(
@@ -655,6 +659,7 @@ module.exports = {
   renderPreviewSlide,
   renderTaxonomySlide,
   renderFigureSlide,
+  renderGapSlide,
   renderComparisonSlide,
   renderTakeawaySlide,
   renderTitleHeroSlide,
