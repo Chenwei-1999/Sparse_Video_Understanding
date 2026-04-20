@@ -1,18 +1,30 @@
 # Citations
 
 ## Core Paper
-- REVISE: REVISE: Towards Sparse Video Understanding and Reasoning / 2024
+- REVISE: REVISE: Towards Sparse Video Understanding and Reasoning / primary paper for this deck
 
 ## Benchmarks
-- NExT-QA: Next-QA: Next Video Question Answering / 2019
-- EgoSchema: EgoSchema: A Diagnostic Benchmark for Long-Form Video Question Answering / 2023
-- VideoEspresso: VideoEspresso: A Benchmark for Temporal Video Understanding / 2024
+- NExT-QA: NExT-QA: Next Video Question Answering / causal, temporal, and descriptive video QA
+- EgoSchema: EgoSchema / egocentric long-video multiple-choice QA
+- VideoEspresso: VideoEspresso / sparse core-frame reasoning benchmark
 
-## Landscape: Agentic / Long-Video Methods
-- VideoAgent: VideoAgent: A Video Agent for Long-Form Video Understanding / 2024
-- VideoTree: VideoTree: Adaptive Frame Selection and Reasoning for Long Video QA / 2024
-- SeViLA: SeViLA: Systematic Video-Language Agent / 2024
-- Flexible Frame Selection: Flexible Frame Selection for Video Question Answering / 2024
-- Adaptive Keyframe Sampling: Adaptive Keyframe Sampling for Efficient Video Understanding / 2024
-- Q-Frame: Q-Frame: Query-Guided Frame Selection for Video QA / 2024
-- BIMBA: BIMBA: Benchmarking Interactive Multi-Step Video Reasoning Agents / 2024
+## Landscape: Caption / Memory
+- LLoVi: LLoVi / caption-then-summarize pipeline for long-video understanding
+- MovieChat: MovieChat / memory-oriented long-video conversation
+- VideoAgent: VideoAgent / caption-guided multi-round frame retrieval
+
+## Landscape: Query-Aware Frame Selection
+- VideoTree: VideoTree / hierarchical frame selection with reasoning
+- Q-Frame: Q-Frame / prompt-conditioned frame selection
+- FlexibleFrameSelection: Flexible Frame Selection / learned differentiable selector
+- AdaptiveKeyframeSampling: Adaptive Keyframe Sampling / learned sparse keyframe policy
+
+## Landscape: Agentic / Iterative Reasoning
+- ActiveVideoPerception: Active Video Perception / plan-observe-reflect loop
+- AIR: A.I.R. / adaptive iterative reasoning-based selection
+- VideoBrain: VideoBrain / dual-agent iterative video reasoning
+- FrameMind: FrameMind / RL-style multi-round reasoning
+- FrameThinker: FrameThinker / frame spotlighting with iterative control
+
+## Reinforcement / Multi-Round Training Context
+- RAGEN: RAGEN / verifier-guided RL context cited by REVISE
