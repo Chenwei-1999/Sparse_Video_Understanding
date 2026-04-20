@@ -1,22 +1,14 @@
 # `revise_reading_group`
 
-Workspace for the REVISE reading-group deck. The deck is generated with `PptxGenJS` from the local JavaScript data files in this directory.
-
-## Layout
-
-- `build_deck.js` renders the PPTX into `output/revise_reading_group.pptx`
-- `theme.js` defines the shared styling tokens
-- `slide_data.js` stores the slide content model
-- `slide_manifest.md` tracks slide intent and ownership
-- `speaker_notes.md` stores the working notes for each slide
-- `citations.md` collects source references for the deck
-
 ## Entrypoints
 
-- Render deck: `node presentations/revise_reading_group/build_deck.js`
-- QA check: `node presentations/revise_reading_group/build_deck.js qa`
+Render:
 
-## Dependencies
+`node presentations/revise_reading_group/build_deck.js`
 
-This workspace expects a local install of `pptxgenjs` under `presentations/revise_reading_group/node_modules/`.
+QA:
+
+`python -m markitdown presentations/revise_reading_group/output/revise_reading_group.pptx`
+
+`python /home/cxk2993/.agents/skills/pptx/scripts/thumbnail.py presentations/revise_reading_group/output/revise_reading_group.pptx presentations/revise_reading_group/review/thumb`
 
