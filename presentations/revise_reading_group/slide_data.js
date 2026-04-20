@@ -148,6 +148,36 @@ const slides = [
       "Caption or memory pipelines compress the video into text, gaining scale but often losing fine visual detail",
       "Query-aware frame selectors and agentic multi-round systems move closer to question-specific evidence gathering"
     ],
+    categories: [
+      {
+        name: "Dense video-LLMs",
+        mechanism: "Process many frames in one pass with direct visual tokens",
+        strength: "Preserve raw visual detail and keep the pipeline simple",
+        weakness: "Consume context budget quickly and revisit redundant evidence",
+        fit: "Shorter videos or tasks where broad visual coverage matters more than targeted retrieval"
+      },
+      {
+        name: "Caption / memory pipelines",
+        mechanism: "Compress video into textual descriptions or memory before reasoning",
+        strength: "Scale to longer videos by moving reasoning into text space",
+        weakness: "May discard the fine-grained visual cues needed for the final answer",
+        fit: "Narrative or event-level questions that tolerate abstraction"
+      },
+      {
+        name: "Query-aware frame selectors",
+        mechanism: "Rank or sample likely-relevant frames conditioned on the prompt",
+        strength: "Improve efficiency by spending budget on candidate evidence",
+        weakness: "Often make an early relevance decision without an evolving uncertainty state",
+        fit: "Settings where one good retrieval pass is often enough"
+      },
+      {
+        name: "Agentic multi-round reasoning",
+        mechanism: "Alternate between reasoning, requesting evidence, and deciding when to stop",
+        strength: "Support adaptive follow-up when the first pass is insufficient",
+        weakness: "Need a stable memory representation to avoid history bloat or drift",
+        fit: "Long-form QA where evidence is sparse and question-specific"
+      }
+    ],
     asset: null,
     citations: ["LLoVi", "MovieChat", "VideoAgent", "VideoTree", "Q-Frame", "FlexibleFrameSelection", "ActiveVideoPerception"],
     notesKey: "s10_taxonomy"
@@ -161,6 +191,28 @@ const slides = [
       "Their strength is scale: captions or textual memories let an LLM traverse long videos without raw visual overload",
       "Their weakness is fidelity: once the abstraction is textual, subtle visual cues may already be gone",
       "These methods are strongest when the question is answerable from high-level event summaries rather than precise frame evidence"
+    ],
+    comparisons: [
+      {
+        aspect: "Primary representation",
+        familyA: "Text summaries, captions, or compressed memory slots",
+        familyB: "Direct frame evidence remains available only indirectly"
+      },
+      {
+        aspect: "Best-case payoff",
+        familyA: "Long-horizon coverage with manageable context cost",
+        familyB: "Strong for coarse event structure and high-level narrative recall"
+      },
+      {
+        aspect: "Failure mode",
+        familyA: "Early compression can hide the exact visual cue the question depends on",
+        familyB: "Downstream reasoning cannot recover detail that was never preserved"
+      },
+      {
+        aspect: "When to prefer it",
+        familyA: "Questions are answerable from semantic summaries",
+        familyB: "The talk task values scale more than frame-level fidelity"
+      }
     ],
     asset: null,
     citations: ["LLoVi", "MovieChat", "VideoAgent"],
@@ -176,6 +228,24 @@ const slides = [
       "They reduce wasted compute, but many still make the key decision before enough evidence has been gathered",
       "Without an explicit evolving state, it is harder to represent what is known, what is missing, and why another frame is needed"
     ],
+    columns: [
+      {
+        label: "What improves",
+        points: [
+          "Cuts redundant frame processing relative to dense uniform sampling",
+          "Makes visual budget explicitly question-aware",
+          "Can be paired with strong back-end VLMs without redesigning the whole stack"
+        ]
+      },
+      {
+        label: "What remains limited",
+        points: [
+          "Many selectors still commit to relevance judgments in effectively one pass",
+          "Selection quality depends on weak early signals before ambiguity is resolved",
+          "They usually lack an explicit state for beliefs, uncertainties, and next-step rationale"
+        ]
+      }
+    ],
     asset: null,
     citations: ["VideoTree", "Q-Frame", "FlexibleFrameSelection", "AdaptiveKeyframeSampling"],
     notesKey: "s12_frame_selection"
@@ -189,6 +259,24 @@ const slides = [
       "Agentic systems can observe, reflect, and request new evidence instead of committing to a single retrieval step",
       "This is closer to how a human would solve long-video QA: inspect, update the hypothesis, then probe the missing piece",
       "The open question is what memory representation keeps those loops stable instead of letting them drift or bloat"
+    ],
+    columns: [
+      {
+        label: "What agentic loops add",
+        points: [
+          "Iterative evidence requests instead of fixed retrieval",
+          "A natural place for uncertainty-driven follow-up",
+          "The option to stop early once the answer is sufficiently supported"
+        ]
+      },
+      {
+        label: "Why memory becomes central",
+        points: [
+          "The agent must preserve verified evidence across rounds",
+          "Full history replay is expensive and can amplify drift",
+          "A compact state representation is needed to keep the loop interpretable and stable"
+        ]
+      }
     ],
     asset: null,
     citations: ["VideoAgent", "ActiveVideoPerception", "AIR", "VideoBrain", "FrameMind", "FrameThinker"],

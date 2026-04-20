@@ -1,30 +1,32 @@
-# Citations
+# Citation Registry
+
+Use these symbolic keys in `slide_data.js`. Entries follow a consistent `Author et al. (Year)` format, with venue or role notes added only where helpful for later deck rendering and review.
 
 ## Core Paper
-- REVISE: REVISE: Towards Sparse Video Understanding and Reasoning / primary paper for this deck
+- REVISE: Li et al. (2025). "REVISE: Towards Sparse Video Understanding and Reasoning." Main paper discussed in this deck.
 
 ## Benchmarks
-- NExT-QA: NExT-QA: Next Video Question Answering / causal, temporal, and descriptive video QA
-- EgoSchema: EgoSchema / egocentric long-video multiple-choice QA
-- VideoEspresso: VideoEspresso / sparse core-frame reasoning benchmark
+- NExT-QA: Xiao et al. (2021). "NExT-QA: Next Phase of Question Answering to Explaining Temporal Actions." CVPR benchmark for causal, temporal, and descriptive video QA.
+- EgoSchema: Mangalam et al. (2023). "EgoSchema: A Diagnostic Benchmark for Very Long-form Video Language Understanding." NeurIPS Datasets and Benchmarks entry for egocentric long-video multiple-choice QA.
+- VideoEspresso: Han et al. (2025). "VideoEspresso." Sparse core-frame reasoning benchmark used heavily in the paper's experiments.
 
 ## Landscape: Caption / Memory
-- LLoVi: LLoVi / caption-then-summarize pipeline for long-video understanding
-- MovieChat: MovieChat / memory-oriented long-video conversation
-- VideoAgent: VideoAgent / caption-guided multi-round frame retrieval
+- LLoVi: Zhang et al. (2023). "LLoVi." Caption-then-summarize pipeline for long-video understanding.
+- MovieChat: Song et al. (2024). "MovieChat." Memory-oriented long-video conversation system.
+- VideoAgent: Wang et al. (2024). "VideoAgent." Caption-guided multi-round frame retrieval and reasoning agent.
 
 ## Landscape: Query-Aware Frame Selection
-- VideoTree: VideoTree / hierarchical frame selection with reasoning
-- Q-Frame: Q-Frame / prompt-conditioned frame selection
-- FlexibleFrameSelection: Flexible Frame Selection / learned differentiable selector
-- AdaptiveKeyframeSampling: Adaptive Keyframe Sampling / learned sparse keyframe policy
+- VideoTree: Wang et al. (2024). "VideoTree." Hierarchical frame selection with reasoning for long-video QA.
+- Q-Frame: Zhang et al. (2025). "Q-Frame." Prompt-conditioned frame selection for video understanding.
+- FlexibleFrameSelection: Buch et al. (2025). "Flexible Frame Selection." Learned differentiable selector for efficient video QA.
+- AdaptiveKeyframeSampling: Tang et al. (2025). "Adaptive Keyframe Sampling." Learned sparse keyframe policy for efficient video understanding.
 
 ## Landscape: Agentic / Iterative Reasoning
-- ActiveVideoPerception: Active Video Perception / plan-observe-reflect loop
-- AIR: A.I.R. / adaptive iterative reasoning-based selection
-- VideoBrain: VideoBrain / dual-agent iterative video reasoning
-- FrameMind: FrameMind / RL-style multi-round reasoning
-- FrameThinker: FrameThinker / frame spotlighting with iterative control
+- ActiveVideoPerception: Wang et al. (2025). "Active Video Perception." Plan-observe-reflect loop for iterative video QA.
+- AIR: Zou et al. (2025). "A.I.R." Adaptive iterative reasoning-based video selection.
+- VideoBrain: Zou et al. (2025). "VideoBrain." Dual-agent iterative video reasoning with behavior-aware rewards.
+- FrameMind: Ge et al. (2025). "FrameMind." RL-style frame-interleaved multi-round reasoning.
+- FrameThinker: He et al. (2025). "FrameThinker." Multi-turn frame spotlighting for video reasoning.
 
 ## Reinforcement / Multi-Round Training Context
-- RAGEN: RAGEN / verifier-guided RL context cited by REVISE
+- RAGEN: Wang et al. (2025). "RAGEN." Verifier-guided reinforcement-learning context cited by REVISE.
